@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemma-mtp"
+version = "0.1.0"
+description = "Reverse-engineering scaffold for Gemma 4 MTP drafter graphs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["torch"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
