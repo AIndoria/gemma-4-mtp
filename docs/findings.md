@@ -178,6 +178,23 @@ So the current best interpretation is:
 - layers 0-2: local attention window of `512`
 - layer 3: full-context attention
 
+The local-window mask is not vague anymore. The constants show:
+
+- `arith.constant15 = [0, 1, 2, ..., 32002]`
+- `arith.constant14 = [512, 513, 514, ..., 32514]`
+- mask rule:
+  - `input_pos >= arange(0, 32003)`
+  - `input_pos < arange(0, 32003) + 512`
+
+So the allowed local positions are exactly:
+
+- `position - 511 <= key_index <= position`
+
+or equivalently:
+
+- `start = max(0, position + 1 - 512)`
+- `end = position + 1`
+
 ### `param_tensor`
 
 The LiteRT runtime helper fills `param_tensor` as:
@@ -191,6 +208,21 @@ The runtime comments state:
 
 In practice, this is what the sliced `runtime_bmm` subgraphs use to choose the
 active local-attention window.
+
+## Attention Parity Check
+
+The repo now includes `scripts/compare_attention_parity.py`, which checks:
+
+- local-window exact full-length masking vs sliced-window formulation
+- full-context masked attention vs straightforward masked softmax attention
+
+Current result:
+
+- local max abs diff: `2.38e-07`
+- full max abs diff: `0.0`
+
+That gives good confidence that the first-pass PyTorch attention helper matches
+the TFLite graph semantics closely for the score/value path.
 
 ## Confidence
 

@@ -7,6 +7,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .config import AttentionSpec, MtpDrafterConfig
+from .runtime_attention import exact_attention_context, resolve_cache_tensor, reshape_grouped_query
 
 
 @dataclass
@@ -54,29 +55,6 @@ class ZeroAttentionAdapter(ExternalAttentionAdapter):
 
 
 class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
-    def _end_index(self, param_tensor: Tensor | None, context_size: int) -> int:
-        if param_tensor is None:
-            return context_size
-        flat = param_tensor.reshape(-1)
-        if flat.numel() < 3:
-            return context_size
-        return max(0, min(int(flat[2].item()), context_size))
-
-    def _prepare_value_cache(self, value_cache: Tensor, window_start: int, window_end: int) -> Tensor:
-        if value_cache.dim() != 4:
-            raise ValueError(f"Expected 4D value cache, got shape {tuple(value_cache.shape)}")
-        # TFLite layout: [B, H, D, C]. Common PyTorch layout: [B, H, C, D].
-        if value_cache.shape[-1] >= window_end and value_cache.shape[-2] == self.spec.query_head_dim:
-            value_cache = value_cache[..., window_start:window_end].transpose(-1, -2)
-        else:
-            value_cache = value_cache[..., window_start:window_end, :]
-        return value_cache
-
-    def _prepare_key_cache(self, key_cache: Tensor, window_start: int, window_end: int) -> Tensor:
-        if key_cache.dim() != 4:
-            raise ValueError(f"Expected 4D key cache, got shape {tuple(key_cache.shape)}")
-        return key_cache[..., window_start:window_end, :]
-
     def forward(
         self,
         hidden_states: Tensor,
@@ -94,12 +72,8 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
         if self.spec.key_cache_name not in base_kv_cache or self.spec.value_cache_name not in base_kv_cache:
             return torch.zeros_like(hidden_states)
 
-        key_cache = base_kv_cache[self.spec.key_cache_name]
-        value_cache = base_kv_cache[self.spec.value_cache_name]
-        if not key_cache.is_floating_point() or not value_cache.is_floating_point():
-            raise ValueError(
-                "GroupedQueryAttentionAdapter currently expects dequantized float KV caches."
-            )
+        key_cache = resolve_cache_tensor(base_kv_cache, self.spec.key_cache_name)
+        value_cache = resolve_cache_tensor(base_kv_cache, self.spec.value_cache_name)
 
         batch_size, steps, _ = hidden_states.shape
         q = self.q_proj(hidden_states)
@@ -110,41 +84,16 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
             self.spec.query_head_dim,
         )
         q = self.query_norm(q)
-        q = q.view(
-            batch_size,
-            steps,
-            self.spec.kv_heads,
-            self.spec.queries_per_kv,
-            self.spec.query_head_dim,
+        q = reshape_grouped_query(q.reshape(batch_size, steps, -1), spec=self.spec)
+        context = exact_attention_context(
+            q,
+            spec=self.spec,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            input_pos=input_pos,
+            mask=mask,
+            param_tensor=param_tensor,
         )
-        q = q.permute(0, 2, 1, 3, 4).reshape(
-            batch_size,
-            self.spec.kv_heads,
-            steps * self.spec.queries_per_kv,
-            self.spec.query_head_dim,
-        )
-
-        context_size = key_cache.shape[-2]
-        end_index = self._end_index(param_tensor, context_size)
-        if self.spec.local_window_size is not None:
-            window_start = max(0, end_index - self.spec.local_window_size)
-        else:
-            window_start = 0
-        window_end = max(window_start, end_index)
-        if window_end <= window_start:
-            return torch.zeros_like(hidden_states)
-
-        k = self._prepare_key_cache(key_cache, window_start, window_end).to(q.dtype)
-        v = self._prepare_value_cache(value_cache, window_start, window_end).to(q.dtype)
-
-        scores = torch.einsum("bhqd,bhkd->bhqk", q, k)
-        if mask is not None:
-            mask_slice = mask[..., window_start:window_end]
-            mask_slice = mask_slice.to(dtype=torch.bool)
-            scores = scores.masked_fill(~mask_slice, torch.finfo(scores.dtype).min)
-
-        probs = torch.softmax(scores, dim=-1)
-        context = torch.einsum("bhqk,bhkd->bhqd", probs, v)
         context = context.reshape(
             batch_size,
             self.spec.kv_heads,

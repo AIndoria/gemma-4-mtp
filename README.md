@@ -18,6 +18,7 @@ PYTHONPATH=src python scripts/fetch_artifacts.py
 PYTHONPATH=src python scripts/fetch_artifacts.py --include-tflite
 PYTHONPATH=src python scripts/inspect_drafter.py
 PYTHONPATH=src python scripts/inspect_attention_runtime.py
+PYTHONPATH=src python scripts/compare_attention_parity.py
 PYTHONPATH=src python scripts/extract_linear_plan.py
 PYTHONPATH=src python scripts/smoke_test.py
 PYTHONPATH=.vendor:src python scripts/export_partial_state_dict.py
