@@ -161,18 +161,18 @@ class MtpDrafterBlock(nn.Module):
         param_tensor: Tensor | None = None,
     ) -> Tensor:
         attn_input = self.pre_attn_norm(hidden_states)
-        hidden_states = hidden_states + self.attention(
+        attn_output = self.attention(
             attn_input,
             mask=mask,
             base_kv_cache=base_kv_cache,
             input_pos=input_pos,
             param_tensor=param_tensor,
         )
-        hidden_states = self.post_attn_norm(hidden_states)
+        hidden_states = hidden_states + self.post_attn_norm(attn_output)
 
         mlp_input = self.pre_ffw_norm(hidden_states)
-        hidden_states = hidden_states + self.mlp(mlp_input)
-        hidden_states = self.post_ffw_norm(hidden_states)
+        mlp_output = self.mlp(mlp_input)
+        hidden_states = hidden_states + self.post_ffw_norm(mlp_output)
         return hidden_states
 
 
