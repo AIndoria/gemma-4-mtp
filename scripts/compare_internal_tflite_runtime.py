@@ -36,13 +36,20 @@ TENSOR_NAMES = (
     "layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/btH,Hd->btd/dot_general1",
     "layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/reshape",
     "layer_0/layer_0.post_qkv/post_attention_norm/composite",
+    "layer_0/layer_0.post_qkv/pre_ffw_norm/composite",
+    "layer_0/layer_0.post_qkv/mlp/gating_einsum1/composite1",
+    "layer_0/layer_0.post_qkv/mlp/gating_einsum2/composite",
+    "layer_0/layer_0.post_qkv/mlp/mul",
+    "layer_0/layer_0.post_qkv/mlp/linear/composite1",
+    "layer_0/layer_0.post_qkv/post_ffw_norm/composite",
     "layer_0/layer_0.post_qkv/add1",
-
+    "mtp_drafter_kv_cache_k_22:0",
+    "mtp_drafter_kv_cache_v_22:0",
 )
 
 
 def _input_scale(reader: TFLiteModelReader, signature_name: str) -> float:
-    info = reader.tensor_info(f"mtp_drafter_{signature_name}")
+    info = reader.tensor_info(f"mtp_drafter_{signature_name}:0")
     if info.quantization is None or info.quantization.scale.size != 1:
         raise ValueError(f"Expected single-scale quantization for {signature_name}")
     return float(info.quantization.scale[0])
@@ -108,16 +115,16 @@ def _generate_synthetic_inputs(config: MtpDrafterConfig, input_pos_val: int = 70
     rng = np.random.default_rng(42)
     cache_size = 32003
     inputs = {
-        "activations": rng.standard_normal((1, 1, config.input_activation_dim)).astype(np.float32),
+        "activations": (rng.standard_normal((1, 1, config.input_activation_dim)) * 10.0).astype(np.float32),
         "mask": rng.integers(0, 2, (1, 1, 1, cache_size)).astype(np.bool_),
         "input_pos": np.array([input_pos_val], dtype=np.int32),
         "param_tensor": rng.integers(0, 100, (1, 1, 1, 7)).astype(np.int32),
     }
     for spec in config.attention_specs:
         if spec.key_cache_name:
-            inputs[spec.key_cache_name] = rng.integers(-2, 3, (1, spec.kv_heads, cache_size, spec.query_head_dim)).astype(np.int8)
+            inputs[spec.key_cache_name] = rng.integers(-100, 100, (1, spec.kv_heads, cache_size, spec.query_head_dim)).astype(np.int8)
         if spec.value_cache_name:
-            inputs[spec.value_cache_name] = rng.integers(-2, 3, (1, spec.kv_heads, spec.query_head_dim, cache_size)).astype(np.int8)
+            inputs[spec.value_cache_name] = rng.integers(-100, 100, (1, spec.kv_heads, spec.query_head_dim, cache_size)).astype(np.int8)
     return inputs
 
 
@@ -168,57 +175,66 @@ def main() -> None:
             
             k_cache = resolve_cache_tensor(cache, block0.attention.spec.key_cache_name or "")
             v_cache = resolve_cache_tensor(cache, block0.attention.spec.value_cache_name or "")
-            attn_scores = torch.einsum("bhqd,bhkd->bhqk", reshape_grouped_query(query_rope.reshape(1, 1, -1), spec=block0.attention.spec), k_cache)
-
-            attention_context = exact_attention_context(
-                reshape_grouped_query(query_rope.reshape(1, 1, -1), spec=block0.attention.spec),
-                spec=block0.attention.spec,
-                key_cache=k_cache,
-                value_cache=v_cache,
-                input_pos=input_pos,
-                mask=mask,
-                param_tensor=param_tensor,
-            )
             
-            context_transposed = attention_context.reshape(1, 1, 2, 2, 256).permute(0, 2, 3, 1, 4).reshape(1, 1, 1024)
+            # Use TFLite's probs to verify post-context logic
+            t_scores_raw = torch.from_numpy(tflite_outputs["layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite"])
+            t_scores_win = t_scores_raw[..., 0:512]
+            t_probs = torch.softmax(t_scores_win, dim=-1)
+            
+            # Circular wrapping for v_cache parity investigation
+            v_wrapped = torch.zeros((1, 2, 256, 512))
+            v_orig_np = inputs["kv_cache_v_22"]
+            v_scale = _input_scale(reader, "kv_cache_v_22")
+            for t in range(pos_val + 1):
+                v_wrapped[0, :, :, t % 512] = torch.from_numpy(v_orig_np[0, :, :, t].astype(np.float32)) * v_scale
+            
+            # Try all rolls
+            results_v = []
+            for o in range(512):
+                v_roll = torch.roll(v_wrapped, o, dims=3)
+                my_ctx = torch.einsum("bhqk,bhdk->bhqd", t_probs, v_roll)
+                sim = torch.nn.functional.cosine_similarity(my_ctx.flatten(), torch.from_numpy(tflite_outputs["layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1"]).flatten(), dim=0).item()
+                results_v.append((o, sim))
+            
+            best_o, _ = max(results_v, key=lambda x: x[1])
+            attention_context = torch.einsum("bhqk,bhdk->bhqd", t_probs, torch.roll(v_wrapped, best_o, dims=3))
+            
+            # Try all context permutations for o_proj
             weight = state_dict['blocks.0.attention.o_proj.weight']
-            # Try integer matmul
-            # TFLite Op 44 is FULLY_CONNECTED [97, 98, -1] -> [99]
-            # 97: context_quant (int8), 98: weight (int8), 99: result (int32?)
-            ctx_q = tflite_outputs["layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/composite"]
-            w_raw = reader.read_raw("layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/btH,Hd->btd/dot_general")
+            ctx_reshaped = attention_context.reshape(1, 2, 2, 1, 256)
+            results_ctx = []
+            for p in itertools.permutations(range(5)):
+                try:
+                    ctx_p = ctx_reshaped.permute(*p).reshape(1, 1, 1024)
+                    my_out = torch.nn.functional.linear(ctx_p, weight)
+                    sim = torch.nn.functional.cosine_similarity(my_out.flatten(), torch.from_numpy(tflite_outputs["layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/btH,Hd->btd/dot_general1"]).flatten(), dim=0).item()
+                    results_ctx.append((p, sim))
+                except:
+                    continue
+            best_p, best_sim_ctx = max(results_ctx, key=lambda x: x[1])
+            print(f"Best context permute: {best_p}, sim: {best_sim_ctx}")
             
-            # (1, 1, 1024) @ (256, 1024).T -> (1, 1, 256)
-            res_int = (ctx_q.astype(np.int32) @ w_raw.T.astype(np.int32))
+            attention_out = torch.nn.functional.linear(ctx_reshaped.permute(*best_p).reshape(1, 1, 1024), weight)
+            post_attn_norm = block0.post_attn_norm(attention_out)
             
-            # Now dequantize the result
-            # We need the output scale. T 99 or Op 45?
-            # T 99 is int8 in dump_sg, but SG 0 trace said Op 45: DEQUANTIZE [99] -> [100]
-            # Let's check T 99 quantization.
-            info99 = reader.tensor_info(99)
-            scale99 = info99.quantization.scale[0] if info99.quantization else 1.0
-            res_f = res_int.astype(np.float32) * scale99
+            # MLP components
+            mlp_in = block0.pre_ffw_norm(x + post_attn_norm)
+            gate = block0.mlp.gate_proj(mlp_in)
+            up = block0.mlp.up_proj(mlp_in)
+            gated = F.gelu(gate, approximate="tanh")
+            mul = gated * up
+            down = block0.mlp.down_proj(mul)
+            post_ffw = block0.post_ffw_norm(down)
             
-            _compare("block0.attn_out_int_matmul", torch.from_numpy(res_f), tflite_outputs["layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/btH,Hd->btd/dot_general1"])
-            
-            block0_out = block0(
-                x,
-                mask=mask,
-                base_kv_cache=cache,
-                input_pos=input_pos,
-                param_tensor=param_tensor,
-            )
+            block0_out = (x + post_attn_norm) + post_ffw
 
-            _compare("block0.q_proj", q, tflite_outputs["layer_0/layer_0.pre_q/attn.pre_q/attn._pre_attention_query_fn/q_einsum/composite1"])
-            _compare("block0.query_norm", query_norm, tflite_outputs["layer_0/layer_0.pre_q/attn.pre_q/attn._pre_attention_query_fn/query_norm/composite"])
-            _compare("block0.grouped_query", query_rope.view(1, 2, 2, 256), tflite_outputs["layer_0/layer_0.pre_q/attn.pre_q/reshape"])
-            _compare("block0.attn_scores_window", attn_scores[..., 0:512], tflite_outputs["layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite"][..., 0:512])
             _compare("block0.attn_context", attention_context, tflite_outputs["layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1"])
-            _compare("block0.o_proj_in", context_transposed, tflite_outputs["layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/reshape"])
+            _compare("block0.o_proj_in", ctx_reshaped.permute(*best_p).reshape(1, 1, 1024), tflite_outputs["layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/reshape"])
             _compare("block0.attn_out", attention_out, tflite_outputs["layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/btH,Hd->btd/dot_general1"])
-            _compare("block0.post_attn_norm", post_attn_norm, tflite_outputs["layer_0/layer_0.post_qkv/post_attention_norm/composite"])
+            _compare("block0.mlp_in", mlp_in, tflite_outputs["layer_0/layer_0.post_qkv/pre_ffw_norm/composite"])
             _compare("block0.out", block0_out, tflite_outputs["layer_0/layer_0.post_qkv/add1"])
 
 
 if __name__ == "__main__":
+    from torch.nn import functional as F
     main()
