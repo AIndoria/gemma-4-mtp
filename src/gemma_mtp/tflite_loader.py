@@ -85,8 +85,26 @@ class TFLiteModelReader:
     def name_to_index(self) -> dict[str, int]:
         mapping: dict[str, int] = {}
         for index in range(self.main_subgraph.TensorsLength()):
-            mapping[self.main_subgraph.Tensors(index).Name().decode()] = index
+            name = self.main_subgraph.Tensors(index).Name().decode()
+            mapping[name] = index
+            if ":" in name:
+                mapping.setdefault(name.split(":", 1)[0], index)
         return mapping
+
+    def input_indices(self) -> tuple[int, ...]:
+        return tuple(int(self.main_subgraph.Inputs(i)) for i in range(self.main_subgraph.InputsLength()))
+
+    def output_indices(self) -> tuple[int, ...]:
+        return tuple(int(self.main_subgraph.Outputs(i)) for i in range(self.main_subgraph.OutputsLength()))
+
+    def input_tensor_infos(self) -> tuple[TensorInfo, ...]:
+        return tuple(self.tensor_info(index) for index in self.input_indices())
+
+    def output_tensor_infos(self) -> tuple[TensorInfo, ...]:
+        return tuple(self.tensor_info(index) for index in self.output_indices())
+
+    def tensor_quantization(self, name_or_index: str | int) -> QuantizationInfo | None:
+        return self.tensor_info(name_or_index).quantization
 
     def tensor_info(self, name_or_index: str | int) -> TensorInfo:
         if isinstance(name_or_index, str):

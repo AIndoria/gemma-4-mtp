@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -31,7 +32,7 @@ class ExternalAttentionAdapter(nn.Module):
         hidden_states: Tensor,
         *,
         mask: Tensor | None = None,
-        base_kv_cache: dict[str, Tensor] | None = None,
+        base_kv_cache: dict[str, Any] | None = None,
         input_pos: Tensor | None = None,
         param_tensor: Tensor | None = None,
     ) -> Tensor:
@@ -44,7 +45,7 @@ class ZeroAttentionAdapter(ExternalAttentionAdapter):
         hidden_states: Tensor,
         *,
         mask: Tensor | None = None,
-        base_kv_cache: dict[str, Tensor] | None = None,
+        base_kv_cache: dict[str, Any] | None = None,
         input_pos: Tensor | None = None,
         param_tensor: Tensor | None = None,
     ) -> Tensor:
@@ -60,11 +61,10 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
         hidden_states: Tensor,
         *,
         mask: Tensor | None = None,
-        base_kv_cache: dict[str, Tensor] | None = None,
+        base_kv_cache: dict[str, Any] | None = None,
         input_pos: Tensor | None = None,
         param_tensor: Tensor | None = None,
     ) -> Tensor:
-        del input_pos
         if not base_kv_cache:
             return torch.zeros_like(hidden_states)
         if self.spec.key_cache_name is None or self.spec.value_cache_name is None:
@@ -145,7 +145,7 @@ class MtpDrafterBlock(nn.Module):
         hidden_states: Tensor,
         *,
         mask: Tensor | None = None,
-        base_kv_cache: dict[str, Tensor] | None = None,
+        base_kv_cache: dict[str, Any] | None = None,
         input_pos: Tensor | None = None,
         param_tensor: Tensor | None = None,
     ) -> Tensor:
@@ -187,7 +187,7 @@ class GemmaMtpDrafter(nn.Module):
         activations: Tensor,
         *,
         mask: Tensor | None = None,
-        base_kv_cache: dict[str, Tensor] | None = None,
+        base_kv_cache: dict[str, Any] | None = None,
         input_pos: Tensor | None = None,
         param_tensor: Tensor | None = None,
     ) -> DrafterOutput:

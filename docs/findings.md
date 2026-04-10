@@ -224,6 +224,50 @@ Current result:
 That gives good confidence that the first-pass PyTorch attention helper matches
 the TFLite graph semantics closely for the score/value path.
 
+## Quantized KV Cache Findings
+
+The external cache contract is clearer now because the real TFLite input
+metadata exposes the quantization parameters directly.
+
+- `kv_cache_v_22`
+  - tensor name: `mtp_drafter_kv_cache_v_22:0`
+  - quantization: per-tensor INT8
+  - scale: `0.047244105488061905`
+  - zero point: `0`
+- `kv_cache_k_22`
+  - tensor name: `mtp_drafter_kv_cache_k_22:0`
+  - quantization: per-tensor INT8
+  - scale: `0.00596147496253252`
+  - zero point: `0`
+- `kv_cache_v_23`
+  - tensor name: `mtp_drafter_kv_cache_v_23:0`
+  - quantization: per-tensor INT8
+  - scale: `0.01785714365541935`
+  - zero point: `0`
+- `kv_cache_k_23`
+  - tensor name: `mtp_drafter_kv_cache_k_23:0`
+  - quantization: per-tensor INT8
+  - scale: `0.001090860809199512`
+  - zero point: `0`
+
+This matters because it means the adapter can consume raw cache tensors without
+needing any per-channel handling for these external inputs.
+
+## Quantized Cache Parity Check
+
+The repo now also includes:
+
+- `scripts/inspect_tflite_quantization.py`
+  - prints the real TFLite input/output quantization contract
+- `scripts/compare_quantized_attention_parity.py`
+  - verifies that feeding raw INT8 KV caches plus recovered scales through the
+    adapter matches feeding explicitly dequantized float caches
+
+Current result:
+
+- local quantized max abs diff: `0.0`
+- full quantized max abs diff: `0.0`
+
 ## Confidence
 
 High confidence:
@@ -267,5 +311,5 @@ This workspace now includes:
    - buffer payloads
    - quantization parameters
 3. Map the named linear weights into the current PyTorch scaffold.
-4. Replace the placeholder attention adapter with a real implementation once
-   cache usage is decoded.
+4. Compare against real TFLite invocation outputs once a lightweight inference
+   harness is in place.

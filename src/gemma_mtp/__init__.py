@@ -15,8 +15,15 @@ __all__ = [
 
 try:
     from .convert import build_partial_state_dict
-    from .tflite_loader import TFLiteModelReader
+    from .tflite_loader import QuantizationInfo, TFLiteModelReader, TensorInfo
 
-    __all__.extend(["build_partial_state_dict", "TFLiteModelReader"])
+    __all__.extend(
+        [
+            "build_partial_state_dict",
+            "QuantizationInfo",
+            "TFLiteModelReader",
+            "TensorInfo",
+        ]
+    )
 except ModuleNotFoundError:
     pass

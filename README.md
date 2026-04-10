@@ -19,6 +19,8 @@ PYTHONPATH=src python scripts/fetch_artifacts.py --include-tflite
 PYTHONPATH=src python scripts/inspect_drafter.py
 PYTHONPATH=src python scripts/inspect_attention_runtime.py
 PYTHONPATH=src python scripts/compare_attention_parity.py
+PYTHONPATH=.vendor:src python scripts/inspect_tflite_quantization.py
+PYTHONPATH=.vendor:src python scripts/compare_quantized_attention_parity.py
 PYTHONPATH=src python scripts/extract_linear_plan.py
 PYTHONPATH=src python scripts/smoke_test.py
 PYTHONPATH=.vendor:src python scripts/export_partial_state_dict.py
@@ -32,6 +34,11 @@ What exists today:
   drafter blocks, final norm, logits head, and post-projection.
 - A TFLite flatbuffer reader that can extract and dequantize known linears from
   the real `mtp_drafter.tflite` file.
+- Recovered external KV-cache quantization metadata:
+  - `kv_cache_v_22`: INT8, scale `0.047244105488061905`
+  - `kv_cache_k_22`: INT8, scale `0.00596147496253252`
+  - `kv_cache_v_23`: INT8, scale `0.01785714365541935`
+  - `kv_cache_k_23`: INT8, scale `0.001090860809199512`
 - An explicit attention adapter boundary for the still-unresolved part: how the
   drafter consumes the base model KV caches named `kv_cache_22` and
   `kv_cache_23`.
