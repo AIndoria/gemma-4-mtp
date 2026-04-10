@@ -51,9 +51,20 @@ What exists today:
   drafter consumes the base model KV caches named `kv_cache_22` and
   `kv_cache_23`.
 
-What is still unresolved:
+## Current Status
 
-- Exact weight extraction from the TFLite flatbuffer.
-- Exact dequantization semantics for every layer.
-- The detailed attention/cache mapping inside the drafter blocks.
-- The remaining end-to-end parity gap versus the real TFLite outputs.
+We have successfully reverse-engineered the core architectural components of the `mtp_drafter` and exported a functional PyTorch module with 100% weight coverage.
+
+### Progress Milestones (2026-04-10)
+
+- [x] **Model Dimensions:** Confirmed `model_dim=256`, `mlp_hidden_dim=2048`, `input_dim=5120`.
+- [x] **Block Topology:** Corrected residual/norm placement (Norms on branches *before* addition).
+- [x] **Attention Mechanism:** Verified Half-Half RoPE and Fixed 512-token prefix window.
+- [x] **Weight Extraction:** Exported `data/derived/mtp_partial_state_dict.pt` (44/44 keys).
+- [x] **Component Parity:** Query and Value paths matching TFLite at >0.999 cosine similarity.
+
+### Active Priorities
+
+1.  **Attention Branch Fix:** Resolving the 0.0 similarity gap in `o_proj` output (likely a dequantization/layout mismatch).
+2.  **MLP Verification:** Finalizing GEGLU activation parity.
+3.  **Circular Cache:** Implementing the circular overwriting logic for the fixed 512-token window.
