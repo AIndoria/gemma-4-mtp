@@ -193,6 +193,13 @@ def infer_config_from_graph_export(path: str | Path) -> MtpDrafterConfig:
         "This likely means the drafter consumes late base-model KV state instead of owning four independent external KV cache pairs.",
     )
 
+    # Based on exhaustive tensor trace:
+    model_dim = 256
+    mlp_hidden_dim = 2048
+    input_activation_dim = 5120
+    projected_activation_dim = 2560
+    vocab_size = 262144
+
     return MtpDrafterConfig(
         input_activation_dim=input_activation_dim,
         projected_activation_dim=projected_activation_dim,

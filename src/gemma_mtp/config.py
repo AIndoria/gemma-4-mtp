@@ -20,12 +20,12 @@ class AttentionSpec:
 
 @dataclass(frozen=True)
 class MtpDrafterConfig:
-    input_activation_dim: int
-    projected_activation_dim: int
-    model_dim: int
-    mlp_hidden_dim: int
-    num_layers: int
-    vocab_size: int
-    attention_specs: tuple[AttentionSpec, ...]
-    base_kv_inputs: tuple[str, ...]
+    input_activation_dim: int = 5120
+    projected_activation_dim: int = 2560
+    model_dim: int = 256
+    mlp_hidden_dim: int = 2048
+    num_layers: int = 4
+    vocab_size: int = 262144
+    attention_specs: tuple[AttentionSpec, ...] = ()
+    base_kv_inputs: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
