@@ -47,7 +47,12 @@ def main() -> None:
         interpreter.allocate_tensors()
         input_details = {detail["name"]: detail["index"] for detail in interpreter.get_input_details()}
         for name, value in inputs.items():
-            interpreter.set_tensor(input_details[f"mtp_drafter_{name}:0"], value)
+            full_name = f"mtp_drafter_{name}:0"
+            interpreter.set_tensor(input_details[full_name], value)
+            if "activations" in name:
+                print(f"Input {name} RMS after set: {np.sqrt(np.mean(interpreter.get_tensor(input_details[full_name]).astype(np.float32)**2))}")
+            if "kv_cache_k_22" in name:
+                print(f"Input {name} RMS after set: {np.sqrt(np.mean(interpreter.get_tensor(input_details[full_name]).astype(np.float32)**2))}")
         interpreter.invoke()
 
         tensor_details = {detail["name"]: detail["index"] for detail in interpreter.get_tensor_details()}
