@@ -36,9 +36,9 @@ def resolve_local_window_bounds(
     context_size: int,
     window_size: int,
 ) -> tuple[int, int]:
-    end = min(position + 1, context_size)
-    start = max(0, end - window_size)
-    return start, end
+    # In the mtp_drafter TFLite graph, the local window is fixed at [0, window_size]
+    # and does not slide with position. The 32003 cache size is a placeholder.
+    return 0, window_size
 
 
 def build_local_window_mask(
@@ -48,8 +48,14 @@ def build_local_window_mask(
     window_size: int,
     device: torch.device,
 ) -> Tensor:
+    # Fixed window at [0, window_size].
+    # Within this window, we can only attend up to 'position'.
     indices = torch.arange(context_size, device=device, dtype=torch.int64)
-    return ((indices <= position) & (indices > position - window_size)).view(1, 1, 1, -1)
+    # 1. Must be in [0, window_size)
+    in_window = indices < window_size
+    # 2. Must be <= position
+    causal = indices <= position
+    return (in_window & causal).view(1, 1, 1, -1)
 
 
 def _maybe_dequantize_tensor(value: Any) -> Tensor:
