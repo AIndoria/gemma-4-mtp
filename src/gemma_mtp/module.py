@@ -21,6 +21,7 @@ class ExternalAttentionAdapter(nn.Module):
         super().__init__()
         self.spec = spec
         self.q_out_dim = spec.query_heads * spec.query_head_dim
+        self.query_norm = RMSNorm(spec.query_head_dim)
         self.q_proj = nn.Linear(model_dim, self.q_out_dim, bias=False)
         self.o_proj = nn.Linear(self.q_out_dim, model_dim, bias=False)
 
@@ -50,6 +51,109 @@ class ZeroAttentionAdapter(ExternalAttentionAdapter):
         # Keep the linear modules present for weight loading, but return a
         # no-op attention contribution until cache semantics are reconstructed.
         return torch.zeros_like(hidden_states)
+
+
+class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
+    def _end_index(self, param_tensor: Tensor | None, context_size: int) -> int:
+        if param_tensor is None:
+            return context_size
+        flat = param_tensor.reshape(-1)
+        if flat.numel() < 3:
+            return context_size
+        return max(0, min(int(flat[2].item()), context_size))
+
+    def _prepare_value_cache(self, value_cache: Tensor, window_start: int, window_end: int) -> Tensor:
+        if value_cache.dim() != 4:
+            raise ValueError(f"Expected 4D value cache, got shape {tuple(value_cache.shape)}")
+        # TFLite layout: [B, H, D, C]. Common PyTorch layout: [B, H, C, D].
+        if value_cache.shape[-1] >= window_end and value_cache.shape[-2] == self.spec.query_head_dim:
+            value_cache = value_cache[..., window_start:window_end].transpose(-1, -2)
+        else:
+            value_cache = value_cache[..., window_start:window_end, :]
+        return value_cache
+
+    def _prepare_key_cache(self, key_cache: Tensor, window_start: int, window_end: int) -> Tensor:
+        if key_cache.dim() != 4:
+            raise ValueError(f"Expected 4D key cache, got shape {tuple(key_cache.shape)}")
+        return key_cache[..., window_start:window_end, :]
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        *,
+        mask: Tensor | None = None,
+        base_kv_cache: dict[str, Tensor] | None = None,
+        input_pos: Tensor | None = None,
+        param_tensor: Tensor | None = None,
+    ) -> Tensor:
+        del input_pos
+        if not base_kv_cache:
+            return torch.zeros_like(hidden_states)
+        if self.spec.key_cache_name is None or self.spec.value_cache_name is None:
+            return torch.zeros_like(hidden_states)
+        if self.spec.key_cache_name not in base_kv_cache or self.spec.value_cache_name not in base_kv_cache:
+            return torch.zeros_like(hidden_states)
+
+        key_cache = base_kv_cache[self.spec.key_cache_name]
+        value_cache = base_kv_cache[self.spec.value_cache_name]
+        if not key_cache.is_floating_point() or not value_cache.is_floating_point():
+            raise ValueError(
+                "GroupedQueryAttentionAdapter currently expects dequantized float KV caches."
+            )
+
+        batch_size, steps, _ = hidden_states.shape
+        q = self.q_proj(hidden_states)
+        q = q.view(
+            batch_size,
+            steps,
+            self.spec.query_heads,
+            self.spec.query_head_dim,
+        )
+        q = self.query_norm(q)
+        q = q.view(
+            batch_size,
+            steps,
+            self.spec.kv_heads,
+            self.spec.queries_per_kv,
+            self.spec.query_head_dim,
+        )
+        q = q.permute(0, 2, 1, 3, 4).reshape(
+            batch_size,
+            self.spec.kv_heads,
+            steps * self.spec.queries_per_kv,
+            self.spec.query_head_dim,
+        )
+
+        context_size = key_cache.shape[-2]
+        end_index = self._end_index(param_tensor, context_size)
+        if self.spec.local_window_size is not None:
+            window_start = max(0, end_index - self.spec.local_window_size)
+        else:
+            window_start = 0
+        window_end = max(window_start, end_index)
+        if window_end <= window_start:
+            return torch.zeros_like(hidden_states)
+
+        k = self._prepare_key_cache(key_cache, window_start, window_end).to(q.dtype)
+        v = self._prepare_value_cache(value_cache, window_start, window_end).to(q.dtype)
+
+        scores = torch.einsum("bhqd,bhkd->bhqk", q, k)
+        if mask is not None:
+            mask_slice = mask[..., window_start:window_end]
+            mask_slice = mask_slice.to(dtype=torch.bool)
+            scores = scores.masked_fill(~mask_slice, torch.finfo(scores.dtype).min)
+
+        probs = torch.softmax(scores, dim=-1)
+        context = torch.einsum("bhqk,bhkd->bhqd", probs, v)
+        context = context.reshape(
+            batch_size,
+            self.spec.kv_heads,
+            steps,
+            self.spec.queries_per_kv,
+            self.spec.query_head_dim,
+        )
+        context = context.permute(0, 2, 1, 3, 4).reshape(batch_size, steps, -1)
+        return self.o_proj(context)
 
 
 class RMSNorm(nn.Module):
@@ -84,7 +188,7 @@ class MtpDrafterBlock(nn.Module):
         self.post_attn_norm = RMSNorm(model_dim)
         self.pre_ffw_norm = RMSNorm(model_dim)
         self.post_ffw_norm = RMSNorm(model_dim)
-        self.attention = ZeroAttentionAdapter(spec, model_dim)
+        self.attention = GroupedQueryAttentionAdapter(spec, model_dim)
         self.mlp = GatedMLP(model_dim=model_dim, hidden_dim=mlp_hidden_dim)
 
     def forward(

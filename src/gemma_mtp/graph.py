@@ -55,28 +55,100 @@ def _find_layer_indices(graph: dict) -> list[int]:
     return sorted(indices)
 
 
+def _find_node_by_namespace(graph: dict, namespace: str) -> dict:
+    for node in graph["nodes"]:
+        if node.get("namespace") == namespace:
+            return node
+    raise KeyError(f"Could not find node with namespace: {namespace}")
+
+
+def _graph_input_output_id_to_signature_name(graph: dict) -> dict[str, str]:
+    node = _find_node_by_namespace(graph, "GraphInputs")
+    mapping: dict[str, str] = {}
+    for metadata in node.get("outputsMetadata", []):
+        attrs = _attrs_to_dict(metadata.get("attrs", []))
+        signature_name = attrs.get("signature_name")
+        if signature_name:
+            mapping[metadata["id"]] = signature_name
+    return mapping
+
+
 def _infer_attention_specs(graph: dict, layer_indices: list[int]) -> tuple[AttentionSpec, ...]:
+    input_id_to_signature = _graph_input_output_id_to_signature_name(graph)
     specs: list[AttentionSpec] = []
     for layer_index in layer_indices:
-        node = _find_node_by_namespace_suffix(
+        query_norm_node = _find_node_by_namespace_suffix(
             graph,
             f"layer_{layer_index}.pre_q/attn.pre_q/attn._pre_attention_query_fn/query_norm/composite",
         )
-        attrs = _attrs_to_dict(node["outputsMetadata"][0]["attrs"])
+        attrs = _attrs_to_dict(query_norm_node["outputsMetadata"][0]["attrs"])
         _, dims = parse_shape(attrs["tensor_shape"])
         if len(dims) != 4:
             raise ValueError(
                 f"Expected 4D query_norm output for layer {layer_index}, got {dims}"
             )
-        query_heads = dims[2]
-        query_head_dim = dims[3]
+        query_heads, query_head_dim = dims[2], dims[3]
+
+        reshape_candidates = []
+        prefix = f"layer_{layer_index}/layer_{layer_index}.pre_q/attn.pre_q/reshape"
+        for node in graph["nodes"]:
+            namespace = node.get("namespace", "")
+            if not namespace.startswith(prefix):
+                continue
+            attrs = _attrs_to_dict(node["outputsMetadata"][0]["attrs"])
+            _, dims = parse_shape(attrs["tensor_shape"])
+            if len(dims) == 4:
+                reshape_candidates.append((node, dims))
+        if not reshape_candidates:
+            raise ValueError(f"Could not find 4D reshaped query tensor for layer {layer_index}")
+        reshape_node, reshape_dims = reshape_candidates[0]
+        kv_heads, queries_per_kv = reshape_dims[1], reshape_dims[2]
+
+        qk_node = _find_node_by_namespace(
+            graph,
+            f"layer_{layer_index}/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite",
+        )
+        qv_node = _find_node_by_namespace(
+            graph,
+            f"layer_{layer_index}/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1",
+        )
+
+        key_cache_name = None
+        value_cache_name = None
+        for edge in qk_node.get("incomingEdges", []):
+            if edge["sourceNodeId"] == "202":
+                candidate = input_id_to_signature.get(edge["sourceNodeOutputId"])
+                if candidate and candidate.startswith("kv_cache_"):
+                    key_cache_name = candidate
+        for edge in qv_node.get("incomingEdges", []):
+            if edge["sourceNodeId"] == "202":
+                candidate = input_id_to_signature.get(edge["sourceNodeOutputId"])
+                if candidate and candidate.startswith("kv_cache_"):
+                    value_cache_name = candidate
+
+        local_window_size = 512 if key_cache_name == "kv_cache_k_22" else None
+        notes = [
+            "External KV mapping was inferred from direct GraphInputs consumers.",
+        ]
+        if local_window_size is not None:
+            notes.append(
+                "This layer uses the sliced runtime_bmm path with an inferred 512-token local window."
+            )
+        else:
+            notes.append("This layer uses the direct full-context runtime_bmm path.")
 
         specs.append(
             AttentionSpec(
                 layer_index=layer_index,
                 query_heads=query_heads,
                 query_head_dim=query_head_dim,
-                notes="External KV mapping is still unresolved; see docs/findings.md.",
+                kv_heads=kv_heads,
+                queries_per_kv=queries_per_kv,
+                key_cache_name=key_cache_name,
+                value_cache_name=value_cache_name,
+                local_window_size=local_window_size,
+                source_kv_cache=key_cache_name,
+                notes=" ".join(notes),
             )
         )
     return tuple(specs)

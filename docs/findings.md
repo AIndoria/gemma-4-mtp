@@ -132,6 +132,66 @@ That boundary matters because it means the initial PyTorch port should not hard
 code a guessed internal KV implementation everywhere. It should isolate that
 part behind an adapter interface.
 
+## Attention / KV Findings
+
+Further inspection of the real `mtp_drafter.tflite` clarifies the attention
+story substantially.
+
+### Cache partitioning
+
+- `layer_0`, `layer_1`, and `layer_2` all consume:
+  - `kv_cache_k_22`
+  - `kv_cache_v_22`
+- `layer_3` alone consumes:
+  - `kv_cache_k_23`
+  - `kv_cache_v_23`
+
+This is not four separate external cache pairs. It is a 4-block drafter that
+reuses late base-model cache state.
+
+### Grouped-query layout
+
+The reshaped query tensors are:
+
+- layers 0-2: `float32[1,2,2,256]`
+- layer 3: `float32[1,2,2,512]`
+
+This implies:
+
+- KV heads: `2`
+- queries per KV head: `2`
+- total query heads: `4`
+
+So the attention is best interpreted as grouped-query attention rather than
+plain 4-head attention with 4 independent KV heads.
+
+### Sliding-window vs full-context
+
+The `runtime_bmm` subgraphs reveal two behaviors:
+
+- layers 0-2 use a sliced runtime path that crops the cache to a 512-token
+  window before the batched matmul
+- layer 3 uses a direct dequantize + batched matmul path over the full cache
+
+So the current best interpretation is:
+
+- layers 0-2: local attention window of `512`
+- layer 3: full-context attention
+
+### `param_tensor`
+
+The LiteRT runtime helper fills `param_tensor` as:
+
+- `[start_index, end_index, end_index]`
+
+The runtime comments state:
+
+- the first 2 parameters are for cache update
+- the 3rd parameter is the end channel index for `runtime_batched_matmul`
+
+In practice, this is what the sliced `runtime_bmm` subgraphs use to choose the
+active local-attention window.
+
 ## Confidence
 
 High confidence:

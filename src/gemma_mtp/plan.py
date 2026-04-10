@@ -149,6 +149,9 @@ def extract_norm_plan(path: str | Path) -> list[ParameterPlan]:
             f"layer_{layer_index}/layer_{layer_index}.pre_q/pre_attention_norm/composite"
         ] = f"blocks.{layer_index}.pre_attn_norm.weight"
         namespace_to_module[
+            f"layer_{layer_index}/layer_{layer_index}.pre_q/attn.pre_q/attn._pre_attention_query_fn/query_norm/composite"
+        ] = f"blocks.{layer_index}.attention.query_norm.weight"
+        namespace_to_module[
             f"layer_{layer_index}/layer_{layer_index}.post_qkv/post_attention_norm/composite"
         ] = f"blocks.{layer_index}.post_attn_norm.weight"
         namespace_to_module[

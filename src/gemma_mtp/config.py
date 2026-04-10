@@ -8,6 +8,11 @@ class AttentionSpec:
     layer_index: int
     query_heads: int
     query_head_dim: int
+    kv_heads: int = 0
+    queries_per_kv: int = 0
+    key_cache_name: str | None = None
+    value_cache_name: str | None = None
+    local_window_size: int | None = None
     source_kv_cache: str | None = None
     notes: str = ""
 
