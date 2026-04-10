@@ -268,6 +268,47 @@ Current result:
 - local quantized max abs diff: `0.0`
 - full quantized max abs diff: `0.0`
 
+## Real TFLite Runtime Comparison
+
+The repo now includes a two-part runtime harness:
+
+- `scripts/run_tflite_inference.py`
+  - runs the real `.tflite` model through `ai-edge-litert`
+- `scripts/compare_tflite_runtime.py`
+  - generates synthetic full-shape inputs
+  - invokes the real TFLite model in an isolated Python 3.12 env
+  - runs the current PyTorch port on the exact same inputs
+  - compares output deltas
+  - can optionally report a zero-attention baseline
+
+Current result with `decode_position=700`, full raw INT8 caches, and the
+zero-attention baseline enabled:
+
+- logits:
+  - max abs diff: `40.72`
+  - mean abs diff: `7.78`
+  - cosine similarity: `0.328`
+  - top-1 argmax match: `False`
+  - zero-attention mean abs diff: `9.37`
+- projected activations:
+  - max abs diff: `69.15`
+  - mean abs diff: `3.27`
+  - cosine similarity: `0.135`
+  - zero-attention mean abs diff: `3.34`
+
+Interpretation:
+
+- the recovered attention path is helping
+  - logits improve relative to the zero-attention baseline
+  - projected activations improve slightly in mean error
+- but the current port is still not numerically close to the real model
+- that makes the remaining gap more likely to live in one or more of:
+  - exact attention scaling / normalization details
+  - the `mlp/activation_fn/composite` implementation
+  - residual ordering or post-attention/post-ffw normalization behavior
+  - any hidden per-op quantization / requantization semantics we are still
+    treating as plain float math
+
 ## Confidence
 
 High confidence:
@@ -288,6 +329,7 @@ Low confidence / open questions:
 - exact mapping from drafter blocks to the base model KV cache tensors
 - exact dequantization and weight packing rules for every tensor
 - exact activation function variant inside `mlp/activation_fn/composite`
+- exact source of the remaining runtime parity gap
 
 ## What I Started Implementing
 
@@ -311,5 +353,5 @@ This workspace now includes:
    - buffer payloads
    - quantization parameters
 3. Map the named linear weights into the current PyTorch scaffold.
-4. Compare against real TFLite invocation outputs once a lightweight inference
-   harness is in place.
+4. Trace the remaining runtime parity gap by instrumenting per-block outputs and
+   matching one unresolved component at a time.

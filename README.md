@@ -14,6 +14,8 @@ Quick start:
 
 ```bash
 python -m pip install --target .vendor flatbuffers tflite
+python3.12 -m venv .venv312
+.venv312/bin/python -m pip install ai-edge-litert
 PYTHONPATH=src python scripts/fetch_artifacts.py
 PYTHONPATH=src python scripts/fetch_artifacts.py --include-tflite
 PYTHONPATH=src python scripts/inspect_drafter.py
@@ -21,6 +23,7 @@ PYTHONPATH=src python scripts/inspect_attention_runtime.py
 PYTHONPATH=src python scripts/compare_attention_parity.py
 PYTHONPATH=.vendor:src python scripts/inspect_tflite_quantization.py
 PYTHONPATH=.vendor:src python scripts/compare_quantized_attention_parity.py
+PYTHONPATH=.vendor:src python scripts/compare_tflite_runtime.py --zero-attn-baseline
 PYTHONPATH=src python scripts/extract_linear_plan.py
 PYTHONPATH=src python scripts/smoke_test.py
 PYTHONPATH=.vendor:src python scripts/export_partial_state_dict.py
@@ -39,6 +42,8 @@ What exists today:
   - `kv_cache_k_22`: INT8, scale `0.00596147496253252`
   - `kv_cache_v_23`: INT8, scale `0.01785714365541935`
   - `kv_cache_k_23`: INT8, scale `0.001090860809199512`
+- A real LiteRT invoke harness that runs the `.tflite` in an isolated Python
+  3.12 env and compares actual TFLite outputs against the current PyTorch port.
 - An explicit attention adapter boundary for the still-unresolved part: how the
   drafter consumes the base model KV caches named `kv_cache_22` and
   `kv_cache_23`.
@@ -48,3 +53,4 @@ What is still unresolved:
 - Exact weight extraction from the TFLite flatbuffer.
 - Exact dequantization semantics for every layer.
 - The detailed attention/cache mapping inside the drafter blocks.
+- The remaining end-to-end parity gap versus the real TFLite outputs.
