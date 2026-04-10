@@ -8,7 +8,12 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .config import AttentionSpec, MtpDrafterConfig
-from .runtime_attention import exact_attention_context, resolve_cache_tensor, reshape_grouped_query
+from .runtime_attention import (
+    apply_query_rope,
+    exact_attention_context,
+    resolve_cache_tensor,
+    reshape_grouped_query,
+)
 
 
 @dataclass
@@ -84,6 +89,12 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
             self.spec.query_head_dim,
         )
         q = self.query_norm(q)
+        q = apply_query_rope(
+            q,
+            spec=self.spec,
+            input_pos=input_pos,
+            param_tensor=param_tensor,
+        )
         q = reshape_grouped_query(q.reshape(batch_size, steps, -1), spec=self.spec)
         context = exact_attention_context(
             q,

@@ -25,15 +25,40 @@ def main() -> None:
         "--signature-key",
         default="mtp_drafter",
     )
+    parser.add_argument(
+        "--preserve-all-tensors",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--dump-tensor",
+        action="append",
+        default=[],
+    )
     args = parser.parse_args()
-
-    interpreter = Interpreter(model_path=args.tflite_model)
-    runner = interpreter.get_signature_runner(args.signature_key)
 
     with np.load(args.inputs) as data:
         inputs = {name: data[name] for name in data.files}
 
-    outputs = runner(**inputs)
+    if args.dump_tensor:
+        interpreter = Interpreter(
+            model_path=args.tflite_model,
+            experimental_preserve_all_tensors=args.preserve_all_tensors,
+        )
+        interpreter.allocate_tensors()
+        input_details = {detail["name"]: detail["index"] for detail in interpreter.get_input_details()}
+        for name, value in inputs.items():
+            interpreter.set_tensor(input_details[f"mtp_drafter_{name}:0"], value)
+        interpreter.invoke()
+
+        tensor_details = {detail["name"]: detail["index"] for detail in interpreter.get_tensor_details()}
+        outputs = {
+            name: interpreter._interpreter.GetTensor(tensor_details[name], 0)
+            for name in args.dump_tensor
+        }
+    else:
+        interpreter = Interpreter(model_path=args.tflite_model)
+        runner = interpreter.get_signature_runner(args.signature_key)
+        outputs = runner(**inputs)
 
     output_path = Path(args.outputs)
     output_path.parent.mkdir(parents=True, exist_ok=True)

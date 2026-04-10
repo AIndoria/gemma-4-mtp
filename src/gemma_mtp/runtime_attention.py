@@ -125,6 +125,31 @@ def reshape_grouped_query(
     )
 
 
+def apply_query_rope(
+    q: Tensor,
+    *,
+    spec: AttentionSpec,
+    input_pos: Tensor | None = None,
+    param_tensor: Tensor | None = None,
+) -> Tensor:
+    if q.dim() != 4:
+        raise ValueError(f"Expected query tensor shaped [B, T, H, D], got {tuple(q.shape)}")
+    if spec.query_head_dim % 2 != 0:
+        raise ValueError(f"RoPE requires an even head dim, got {spec.query_head_dim}")
+
+    position = resolve_decode_position(input_pos, param_tensor, context_size=32003)
+    half_dim = spec.query_head_dim // 2
+
+    exponent = torch.arange(half_dim, device=q.device, dtype=torch.float32) / half_dim
+    inv_freq = torch.pow(torch.tensor(spec.rope_base, device=q.device, dtype=torch.float32), -exponent)
+    angles = inv_freq * float(position)
+    cos = torch.cos(angles).view(1, 1, 1, half_dim).to(dtype=q.dtype)
+    sin = torch.sin(angles).view(1, 1, 1, half_dim).to(dtype=q.dtype)
+
+    q1, q2 = q[..., :half_dim], q[..., half_dim:]
+    return torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+
+
 def exact_attention_context(
     q: Tensor,
     *,

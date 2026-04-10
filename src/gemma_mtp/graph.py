@@ -127,6 +127,7 @@ def _infer_attention_specs(graph: dict, layer_indices: list[int]) -> tuple[Atten
                     value_cache_name = candidate
 
         local_window_size = 512 if key_cache_name == "kv_cache_k_22" else None
+        rope_base = 1_000_000.0 if query_head_dim >= 512 else 10_000.0
         notes = [
             "External KV mapping was inferred from direct GraphInputs consumers.",
         ]
@@ -136,12 +137,14 @@ def _infer_attention_specs(graph: dict, layer_indices: list[int]) -> tuple[Atten
             )
         else:
             notes.append("This layer uses the direct full-context runtime_bmm path.")
+        notes.append(f"Recovered query-side RoPE base: {rope_base:g}.")
 
         specs.append(
             AttentionSpec(
                 layer_index=layer_index,
                 query_heads=query_heads,
                 query_head_dim=query_head_dim,
+                rope_base=rope_base,
                 kv_heads=kv_heads,
                 queries_per_kv=queries_per_kv,
                 key_cache_name=key_cache_name,

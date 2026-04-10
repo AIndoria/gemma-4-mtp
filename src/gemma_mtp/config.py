@@ -8,6 +8,7 @@ class AttentionSpec:
     layer_index: int
     query_heads: int
     query_head_dim: int
+    rope_base: float = 10000.0
     kv_heads: int = 0
     queries_per_kv: int = 0
     key_cache_name: str | None = None

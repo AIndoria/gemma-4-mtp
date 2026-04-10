@@ -285,29 +285,56 @@ Current result with `decode_position=700`, full raw INT8 caches, and the
 zero-attention baseline enabled:
 
 - logits:
-  - max abs diff: `40.72`
-  - mean abs diff: `7.78`
-  - cosine similarity: `0.328`
+  - max abs diff: `41.72`
+  - mean abs diff: `7.84`
+  - cosine similarity: `0.319`
   - top-1 argmax match: `False`
   - zero-attention mean abs diff: `9.37`
 - projected activations:
-  - max abs diff: `69.15`
-  - mean abs diff: `3.27`
-  - cosine similarity: `0.135`
+  - max abs diff: `42.67`
+  - mean abs diff: `3.31`
+  - cosine similarity: `0.396`
   - zero-attention mean abs diff: `3.34`
 
 Interpretation:
 
 - the recovered attention path is helping
   - logits improve relative to the zero-attention baseline
-  - projected activations improve slightly in mean error
+  - projected activations improve sharply in max error and cosine after adding
+    recovered query-side RoPE
 - but the current port is still not numerically close to the real model
 - that makes the remaining gap more likely to live in one or more of:
-  - exact attention scaling / normalization details
-  - the `mlp/activation_fn/composite` implementation
+  - exact runtime attention/KV-cache semantics inside `dot_attn._qkv_fn`
+  - whether the external key/value caches need additional runtime-side handling
   - residual ordering or post-attention/post-ffw normalization behavior
   - any hidden per-op quantization / requantization semantics we are still
     treating as plain float math
+
+## Internal Layer-0 Parity Localization
+
+`scripts/compare_internal_tflite_runtime.py` now compares selected internal
+TFLite tensors against the current PyTorch block-0 path using the exact same
+saved synthetic inputs from `scripts/compare_tflite_runtime.py`.
+
+Current result:
+
+- very close through the query path
+  - `pre_project`: cosine `0.9990`
+  - `block0.pre_attn_norm`: cosine `0.9990`
+  - `block0.q_proj`: cosine `0.9987`
+  - `block0.query_norm`: cosine `0.9987`
+  - `block0.query_rope`: cosine `0.9987`
+  - `block0.grouped_query`: cosine `0.9987`
+- divergence begins inside attention proper
+  - `block0.attn_context_grouped`: cosine `0.5008`
+  - `block0.attn_out`: cosine `0.5972`
+  - `block0.post_attn_norm`: cosine `0.4551`
+  - `block0.out`: cosine `0.4735`
+  - `final_norm`: cosine `0.1960`
+
+This is the strongest current localization signal. The remaining work is not
+the query projection or RoPE path anymore. It is the exact behavior of the
+custom attention runtime over the external KV caches.
 
 ## Confidence
 
