@@ -51,13 +51,14 @@ matters:
   quantized path; naive one-sided approximations were misleading
 
 With those contracts in place, the tested runtime path is now very close to
-TFLite and matches top-1 on all currently checked decode positions.
+TFLite, but broader stress testing shows a small number of remaining top-1
+flips under harder synthetic seeds.
 
 ### Teacher-forced parity at position 700
 
 Using exact TFLite hidden states as inputs:
 
-- `layer_1.block_out`: cosine `0.9861`
+- `layer_1.block_out`: cosine `1.0000`
 - `layer_2.block_out`: cosine `1.0000`
 - `layer_3.query_rope`: cosine `1.0000`
 - `layer_3.attn_context`: cosine `1.0000`
@@ -89,6 +90,47 @@ This is the first checkpoint where parity is consistently very strong across
 shallow, middle, and deeper decode positions **and** all three tested positions
 agree on top-1 token selection.
 
+### Broader runtime sweep
+
+The repo now includes `scripts/sweep_runtime_parity.py`, which automates the
+end-to-end TFLite-vs-PyTorch comparison across multiple decode positions and
+RNG seeds.
+
+On a first stress pass over positions `50`, `700`, `1000`, and `1500` with
+seeds `0-4`:
+
+- cases checked: `20`
+- top-1 matches: `17/20`
+- minimum logits cosine: `0.9661`
+- minimum projected-activations cosine: `0.9853`
+
+Failing cases from that sweep:
+
+- position `700`, seed `1`
+- position `1500`, seed `1`
+- position `1500`, seed `3`
+
+These failures are not wide divergences. In each case, cosine remains strong
+and the wrong prediction comes from a winner flip among a small set of
+high-scoring candidates.
+
+### Current best explanation for the remaining gap
+
+The broad architecture now looks settled. The remaining problem is small
+self-fed hidden-state drift that compounds across layers for some long-context
+inputs.
+
+For one failing case (`position 1500`, `seed 1`), the self-fed layer outputs
+compare to TFLite as:
+
+- `layer_0_out`: cosine `0.9977`
+- `layer_1_out`: cosine `0.9932`
+- `layer_2_out`: cosine `0.9882`
+- `layer_3_out`: cosine `0.9853`
+
+That pattern suggests the current model is very close, but not yet bit-stable
+enough to guarantee identical top-1 ranking across all tested synthetic cases.
+
 ### Final heads are not the main problem
 
 If exact TFLite final hidden states are fed into our recovered output path:
@@ -103,16 +145,15 @@ projection.
 
 ## Remaining Work
 
-The highest-value unresolved area is no longer broad hidden-state drift. The
-tested path is now very close. What remains is broader verification and any
-residual edge cases outside the currently checked decode points.
+The highest-value unresolved area is now narrow:
 
-Current likely candidates:
-
-1. broader verification over more decode positions and possibly real sampled
-   activation traces, not just the current synthetic checkpoints
-2. confirming whether any residual mismatch remains in untested edge cases
-3. deciding when the reconstruction is strong enough to export as the default
+1. reduce the small self-fed drift that still appears in some longer-context
+   synthetic cases
+2. determine whether that drift comes from one last runtime contract in block 0
+   or from accumulated float-vs-quantized behavior across all blocks
+3. broaden verification further, ideally with more decode positions and less
+   synthetic activation traces
+4. decide when the reconstruction is strong enough to export as the default
    recovered PyTorch implementation
 
 ## Implementation Status
@@ -127,6 +168,8 @@ Current likely candidates:
   - recovered layer-3 partial rotary behavior
 - the repo also now includes `scripts/compare_teacher_forced_blocks.py` for
   localizing parity by block using preserved TFLite intermediates
+- the repo also now includes `scripts/sweep_runtime_parity.py` for automated
+  position/seed stress testing
 
 ## Sources Consulted
 
