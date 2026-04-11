@@ -41,11 +41,20 @@ def hydrate_runtime_quantization(
     graph = _top_graph(load_graph_export(graph_json_path))
     node_by_namespace = {node["namespace"]: node for node in graph["nodes"]}
     output_quant_modules = {
-        "post_project",
+        "pre_project",
         *{f"blocks.{layer_index}.attention.q_proj" for layer_index in range(model.config.num_layers)},
         *{f"blocks.{layer_index}.mlp.gate_proj" for layer_index in range(model.config.num_layers)},
         *{f"blocks.{layer_index}.mlp.up_proj" for layer_index in range(model.config.num_layers)},
         *{f"blocks.{layer_index}.mlp.down_proj" for layer_index in range(model.config.num_layers)},
+        "post_project",
+    }
+    input_quant_modules = {
+        "pre_project",
+        *{f"blocks.{layer_index}.attention.q_proj" for layer_index in range(model.config.num_layers)},
+        *{f"blocks.{layer_index}.mlp.gate_proj" for layer_index in range(model.config.num_layers)},
+        *{f"blocks.{layer_index}.mlp.up_proj" for layer_index in range(model.config.num_layers)},
+        *{f"blocks.{layer_index}.mlp.down_proj" for layer_index in range(model.config.num_layers)},
+        "post_project",
     }
 
     for plan in extract_linear_plan(graph_json_path):
@@ -59,6 +68,19 @@ def hydrate_runtime_quantization(
                 match = re.match(r"([0-9.eE+-]+) \* q", quantization)
                 if match is not None:
                     output_quant = torch.tensor(float(match.group(1)), dtype=torch.float32)
+
+        if (
+            isinstance(module, OutputQuantLinear)
+            and plan.module_name in input_quant_modules
+            and plan.input_ref is not None
+            and plan.input_ref.quantization is not None
+        ):
+            match = re.match(r"([0-9.eE+-]+) \* q", plan.input_ref.quantization)
+            if match is not None:
+                module.set_input_quantization(
+                    input_scale=torch.tensor(float(match.group(1)), dtype=torch.float32),
+                    input_zero_point=torch.tensor(0.0, dtype=torch.float32),
+                )
 
         if (
             isinstance(module, OutputQuantLinear)

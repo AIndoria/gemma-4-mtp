@@ -27,8 +27,19 @@ class DrafterOutput:
 class OutputQuantLinear(nn.Linear):
     def __init__(self, in_features: int, out_features: int, *, bias: bool = False) -> None:
         super().__init__(in_features, out_features, bias=bias)
+        self.register_buffer("input_scale", None, persistent=False)
+        self.register_buffer("input_zero_point", None, persistent=False)
         self.register_buffer("output_scale", None, persistent=False)
         self.register_buffer("output_zero_point", None, persistent=False)
+
+    def set_input_quantization(
+        self,
+        *,
+        input_scale: Tensor,
+        input_zero_point: Tensor,
+    ) -> None:
+        self.input_scale = input_scale
+        self.input_zero_point = input_zero_point
 
     def set_output_quantization(
         self,
@@ -40,6 +51,12 @@ class OutputQuantLinear(nn.Linear):
         self.output_zero_point = output_zero_point
 
     def forward(self, input: Tensor) -> Tensor:
+        if self.input_scale is not None and self.input_zero_point is not None:
+            input_scale = self.input_scale.to(device=input.device, dtype=torch.float32)
+            input_zero = self.input_zero_point.to(device=input.device, dtype=torch.float32)
+            q = torch.round(input.to(torch.float32) / input_scale + input_zero).clamp(-128, 127)
+            input = (q - input_zero) * input_scale
+
         output = super().forward(input)
         if self.output_scale is None or self.output_zero_point is None:
             return output

@@ -34,34 +34,35 @@ module or a broken output head.
 
 ## Latest Milestone
 
-The newest checkpoint recovered another important runtime contract: several
-internal linears are not just "float matmuls with quantized weights," they also
-need their outputs snapped back onto the TFLite int8 grid.
+The newest checkpoint recovered the missing quantization contracts for the
+remaining linear stack:
 
-The useful subset was:
+- `pre_project`: input-side int8 snap plus output-side int8 snap
+- all `q_proj` linears: input-side int8 snap
+- all MLP linears (`gate_proj`, `up_proj`, `down_proj`): input-side int8 snap
+- `post_project`: input-side int8 snap
 
-- all `q_proj` linears
-- all MLP linears (`gate_proj`, `up_proj`, `down_proj`)
-- `post_project`
+The important lesson from this pass is that the direction of quantization
+matters:
 
-One especially helpful negative result also came out of this pass:
+- for `q_proj`, MLP, and `post_project`, **input-side** snapping was the real
+  missing contract
+- for `pre_project`, the correct behavior required both the input and output
+  quantized path; naive one-sided approximations were misleading
 
-- `pre_project` is quantized in the graph, but naively forcing it onto the same
-  output grid made parity worse, so it is intentionally left float for now
-
-This output-quantization pass materially improved end-to-end parity without
-hurting the already-strong teacher-forced block checks.
+With those contracts in place, the tested runtime path is now very close to
+TFLite and matches top-1 on all currently checked decode positions.
 
 ### Teacher-forced parity at position 700
 
 Using exact TFLite hidden states as inputs:
 
 - `layer_1.block_out`: cosine `0.9861`
-- `layer_2.block_out`: cosine `0.9995`
-- `layer_3.query_rope`: cosine `0.9996`
-- `layer_3.attn_context`: cosine `0.9983`
-- `layer_3.attn_out`: cosine `0.9942`
-- `layer_3.block_out`: cosine `0.9995`
+- `layer_2.block_out`: cosine `1.0000`
+- `layer_3.query_rope`: cosine `1.0000`
+- `layer_3.attn_context`: cosine `1.0000`
+- `layer_3.attn_out`: cosine `1.0000`
+- `layer_3.block_out`: cosine `1.0000`
 
 This is strong evidence that the recovered block topology, grouped-query
 attention path, quantized `o_proj`, and final-block partial RoPE are all
@@ -72,21 +73,21 @@ substantially correct.
 Using `scripts/compare_tflite_runtime.py` on current code:
 
 - position `50`
-  - logits cosine: `0.9557`
-  - projected activations cosine: `0.9741`
+  - logits cosine: `0.9978`
+  - projected activations cosine: `1.0000`
   - top-1 match: `True`
 - position `700`
-  - logits cosine: `0.9547`
-  - projected activations cosine: `0.9785`
-  - top-1 match: `False`
+  - logits cosine: `0.9936`
+  - projected activations cosine: `0.9980`
+  - top-1 match: `True`
 - position `1000`
-  - logits cosine: `0.9471`
-  - projected activations cosine: `0.9633`
-  - top-1 match: `False`
+  - logits cosine: `0.9889`
+  - projected activations cosine: `0.9959`
+  - top-1 match: `True`
 
-This is the first checkpoint where parity is consistently strong across shallow,
-middle, and deeper decode positions. It is still not fully verified, but it is
-much closer to exportable than the previous checkpoint.
+This is the first checkpoint where parity is consistently very strong across
+shallow, middle, and deeper decode positions **and** all three tested positions
+agree on top-1 token selection.
 
 ### Final heads are not the main problem
 
@@ -96,22 +97,23 @@ If exact TFLite final hidden states are fed into our recovered output path:
 - `logits_head`: cosine `0.9987`
 - `post_project`: cosine `0.9850`
 
-That means the remaining end-to-end gap is mostly **hidden-state drift inside
-the recurrent block stack**, not a bad final projection.
+That means the remaining end-to-end gap was mostly **hidden-state drift from
+missing quantization contracts inside the recurrent stack**, not a bad final
+projection.
 
 ## Remaining Work
 
-The highest-value unresolved area is reducing the hidden-state drift that starts
-early and compounds across blocks on self-generated inputs.
+The highest-value unresolved area is no longer broad hidden-state drift. The
+tested path is now very close. What remains is broader verification and any
+residual edge cases outside the currently checked decode points.
 
 Current likely candidates:
 
-1. exact block-0/local-attention/runtime behavior in the remaining top-1
-   mismatch cases
-2. more precise handling of early-linears such as `pre_project`, whose graph
-   quantization is real but whose naive emulation currently hurts parity
-3. any additional small runtime quantization contracts that only show up in
-   self-fed inference and not under teacher forcing
+1. broader verification over more decode positions and possibly real sampled
+   activation traces, not just the current synthetic checkpoints
+2. confirming whether any residual mismatch remains in untested edge cases
+3. deciding when the reconstruction is strong enough to export as the default
+   recovered PyTorch implementation
 
 ## Implementation Status
 
@@ -120,7 +122,8 @@ Current likely candidates:
 - the PyTorch scaffold includes:
   - grouped-query attention over external KV caches
   - quantized `o_proj` runtime emulation
-  - output-quantized `q_proj`, MLP, and `post_project` runtime emulation
+  - input-quantized `q_proj`, MLP, and `post_project` runtime emulation
+  - exact quantized `pre_project` runtime emulation
   - recovered layer-3 partial rotary behavior
 - the repo also now includes `scripts/compare_teacher_forced_blocks.py` for
   localizing parity by block using preserved TFLite intermediates
