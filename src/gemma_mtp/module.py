@@ -29,6 +29,9 @@ class OutputQuantLinear(nn.Linear):
         super().__init__(in_features, out_features, bias=bias)
         self.register_buffer("input_scale", None, persistent=False)
         self.register_buffer("input_zero_point", None, persistent=False)
+        self.register_buffer("weight_q", None, persistent=False)
+        self.register_buffer("weight_scale", None, persistent=False)
+        self.register_buffer("weight_zero_point", None, persistent=False)
         self.register_buffer("output_scale", None, persistent=False)
         self.register_buffer("output_zero_point", None, persistent=False)
 
@@ -50,14 +53,46 @@ class OutputQuantLinear(nn.Linear):
         self.output_scale = output_scale
         self.output_zero_point = output_zero_point
 
-    def forward(self, input: Tensor) -> Tensor:
-        if self.input_scale is not None and self.input_zero_point is not None:
-            input_scale = self.input_scale.to(device=input.device, dtype=torch.float32)
-            input_zero = self.input_zero_point.to(device=input.device, dtype=torch.float32)
-            q = torch.round(input.to(torch.float32) / input_scale + input_zero).clamp(-128, 127)
-            input = (q - input_zero) * input_scale
+    def set_weight_quantization(
+        self,
+        *,
+        weight_q: Tensor,
+        weight_scale: Tensor,
+        weight_zero_point: Tensor,
+    ) -> None:
+        self.weight_q = weight_q
+        self.weight_scale = weight_scale
+        self.weight_zero_point = weight_zero_point
 
-        output = super().forward(input)
+    def forward(self, input: Tensor) -> Tensor:
+        q_input: Tensor | None = None
+        input_scale_f32: Tensor | None = None
+        input_zero_f32: Tensor | None = None
+        if self.input_scale is not None and self.input_zero_point is not None:
+            input_scale_f32 = self.input_scale.to(device=input.device, dtype=torch.float32)
+            input_zero_f32 = self.input_zero_point.to(device=input.device, dtype=torch.float32)
+            q_input = torch.round(input.to(torch.float32) / input_scale_f32 + input_zero_f32).clamp(-128, 127)
+            input = (q_input - input_zero_f32) * input_scale_f32
+
+        use_quant_weight_path = (
+            q_input is not None
+            and self.weight_q is not None
+            and self.weight_scale is not None
+            and self.weight_zero_point is not None
+        )
+        if use_quant_weight_path:
+            x_q = q_input.to(torch.int32)
+            x_zero = input_zero_f32.to(torch.int32)
+            w_q = self.weight_q.to(device=input.device, dtype=torch.int32)
+            w_scale = self.weight_scale.to(device=input.device, dtype=torch.float32)
+            w_zero = self.weight_zero_point.to(device=input.device, dtype=torch.int32)
+            x_centered = x_q - x_zero
+            w_centered = w_q - w_zero.view(-1, 1)
+            acc = torch.einsum("bti,oi->bto", x_centered, w_centered)
+            output = acc.to(torch.float32) * input_scale_f32 * w_scale.view(1, 1, -1)
+        else:
+            output = super().forward(input)
+
         if self.output_scale is None or self.output_zero_point is None:
             return output
 

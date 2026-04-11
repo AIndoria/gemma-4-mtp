@@ -96,18 +96,17 @@ The repo now includes `scripts/sweep_runtime_parity.py`, which automates the
 end-to-end TFLite-vs-PyTorch comparison across multiple decode positions and
 RNG seeds.
 
-On a first stress pass over positions `50`, `700`, `1000`, and `1500` with
+On an updated stress pass over positions `50`, `700`, `1000`, and `1500` with
 seeds `0-4`:
 
 - cases checked: `20`
-- top-1 matches: `17/20`
-- minimum logits cosine: `0.9661`
-- minimum projected-activations cosine: `0.9853`
+- top-1 matches: `18/20`
+- minimum logits cosine: `0.9885`
+- minimum projected-activations cosine: `0.9817`
 
 Failing cases from that sweep:
 
-- position `700`, seed `1`
-- position `1500`, seed `1`
+- position `1500`, seed `0`
 - position `1500`, seed `3`
 
 These failures are not wide divergences. In each case, cosine remains strong
@@ -120,16 +119,32 @@ The broad architecture now looks settled. The remaining problem is small
 self-fed hidden-state drift that compounds across layers for some long-context
 inputs.
 
-For one failing case (`position 1500`, `seed 1`), the self-fed layer outputs
+For one failing case (`position 1500`, `seed 3`), the self-fed layer outputs
 compare to TFLite as:
 
-- `layer_0_out`: cosine `0.9977`
-- `layer_1_out`: cosine `0.9932`
-- `layer_2_out`: cosine `0.9882`
-- `layer_3_out`: cosine `0.9853`
+- `layer_0_out`: cosine `1.0000`
+- `layer_1_out`: cosine `0.9999`
+- `layer_2_out`: cosine `0.9948`
+- `layer_3_out`: cosine `0.9930`
 
 That pattern suggests the current model is very close, but not yet bit-stable
 enough to guarantee identical top-1 ranking across all tested synthetic cases.
+
+### What the newest isolation checks show
+
+Two additional points are now clear:
+
+1. **`pre_project` was still a real source of one-bin mismatch.**
+   - switching from rounded graph-export scales to exact internal TFLite tensor
+     quantization improved the stress sweep from `17/20` to `18/20`
+   - two former failing cases (`position 700, seed 1` and `position 1500,
+     seed 1`) now match top-1
+2. **The final remaining drift is no longer in `pre_project` or block 0.**
+   - for the stubborn long-context failures, `pre_project` is now exact
+   - block 0 is exact or effectively exact when compared directly against
+     preserved TFLite tensors
+   - the first visible self-fed drift now starts in layer 1 and then compounds
+     through layers 2 and 3
 
 ### Final heads are not the main problem
 
