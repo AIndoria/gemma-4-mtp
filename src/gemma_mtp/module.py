@@ -108,11 +108,11 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
         context = context.reshape(
             batch_size,
             self.spec.kv_heads,
-            steps,
             self.spec.queries_per_kv,
+            steps,
             self.spec.query_head_dim,
         )
-        context = context.permute(0, 2, 1, 3, 4).reshape(batch_size, steps, -1)
+        context = context.permute(0, 3, 1, 2, 4).reshape(batch_size, steps, -1)
         return self.o_proj(context)
 
 

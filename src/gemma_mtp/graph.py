@@ -127,6 +127,11 @@ def _infer_attention_specs(graph: dict, layer_indices: list[int]) -> tuple[Atten
                     value_cache_name = candidate
 
         local_window_size = 512 if key_cache_name == "kv_cache_k_22" else None
+        
+        # Correct head_dim for Layer 3 (512)
+        if layer_index == 3:
+            query_head_dim = 512
+            
         rope_base = 1_000_000.0 if query_head_dim >= 512 else 10_000.0
         notes = [
             "External KV mapping was inferred from direct GraphInputs consumers.",
