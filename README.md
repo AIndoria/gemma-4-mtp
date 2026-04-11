@@ -45,26 +45,36 @@ What exists today:
   - `kv_cache_k_23`: INT8, scale `0.001090860809199512`
 - A real LiteRT invoke harness that runs the `.tflite` in an isolated Python
   3.12 env and compares actual TFLite outputs against the current PyTorch port.
-- A block-level internal parity harness that shows the PyTorch port matches
-  closely through query RoPE and then diverges inside the attention reduction.
-- An explicit attention adapter boundary for the still-unresolved part: how the
-  drafter consumes the base model KV caches named `kv_cache_22` and
-  `kv_cache_23`.
+- A block-level internal parity harness that can compare teacher-forced and
+  self-fed execution against preserved TFLite tensors.
+- Runtime quantization recovery for `pre_project`, `q_proj`, the MLP linears,
+  `o_proj`, and `post_project`.
 
 ## Current Status
 
-We have successfully reverse-engineered the core architectural components of the `mtp_drafter` and exported a functional PyTorch module with 100% weight coverage.
+The reverse-engineered PyTorch port is now very close to the real LiteRT
+runtime on the tested decode positions.
 
-### Progress Milestones (2026-04-10)
+Latest checked parity:
 
-- [x] **Model Dimensions:** Confirmed `model_dim=256`, `mlp_hidden_dim=2048`, `input_dim=5120`.
-- [x] **Block Topology:** Corrected residual/norm placement (Norms on branches *before* addition).
-- [x] **Attention Mechanism:** Verified Half-Half RoPE and Fixed 512-token prefix window.
-- [x] **Weight Extraction:** Exported `data/derived/mtp_partial_state_dict.pt` (44/44 keys).
-- [x] **Component Parity:** Query and Value paths matching TFLite at >0.999 cosine similarity.
+- position `50`
+  - logits cosine `0.9978`
+  - projected activations cosine `1.0000`
+  - top-1 match `True`
+- position `700`
+  - logits cosine `0.9936`
+  - projected activations cosine `0.9980`
+  - top-1 match `True`
+- position `1000`
+  - logits cosine `0.9889`
+  - projected activations cosine `0.9959`
+  - top-1 match `True`
 
-### Active Priorities
+The detailed running log and current caveats live in `docs/findings.md`.
 
-1.  **Attention Branch Fix:** Resolving the 0.0 similarity gap in `o_proj` output (likely a dequantization/layout mismatch).
-2.  **MLP Verification:** Finalizing GEGLU activation parity.
-3.  **Circular Cache:** Implementing the circular overwriting logic for the fixed 512-token window.
+## License
+
+- Original repository code and documentation are licensed under
+  `AGPL-3.0-only`. See `LICENSE`.
+- Gemma-derived artifacts and upstream materials are not relicensed by this
+  repo. See `NOTICE`.

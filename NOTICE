@@ -1,0 +1,17 @@
+This repository contains a mix of original reverse-engineering code and
+third-party model artifacts or metadata.
+
+Licensing intent for this repository:
+
+- Original code and documentation in this repository, unless otherwise noted,
+  are licensed under the GNU Affero General Public License v3.0 only. See
+  `LICENSE`.
+- Third-party artifacts, model files, extracted graph exports, and any
+  Gemma-derived materials remain subject to their upstream licenses and terms.
+  This repository does not relicense those materials.
+
+Practical rule:
+
+- Treat the reconstruction code as `AGPL-3.0-only`.
+- Treat Gemma-derived artifacts as remaining under the upstream Gemma terms and
+  notices that apply to them.
