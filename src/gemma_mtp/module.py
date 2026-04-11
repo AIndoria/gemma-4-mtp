@@ -63,6 +63,7 @@ class ExternalAttentionAdapter(nn.Module):
         if self.o_proj_weight_q is None or self.o_proj_weight_scale is None:
             return self.o_proj(hidden_states)
 
+        x_q = self.quantize_o_proj_input(hidden_states)
         x_scale = self.o_proj_input_scale.to(device=hidden_states.device, dtype=torch.float32)
         x_zero = self.o_proj_input_zero_point.to(device=hidden_states.device, dtype=torch.float32)
         w_q = self.o_proj_weight_q.to(device=hidden_states.device, dtype=torch.int32)
@@ -71,13 +72,20 @@ class ExternalAttentionAdapter(nn.Module):
         y_scale = self.o_proj_output_scale.to(device=hidden_states.device, dtype=torch.float32)
         y_zero = self.o_proj_output_zero_point.to(device=hidden_states.device, dtype=torch.float32)
 
-        x_q = torch.round(hidden_states.to(torch.float32) / x_scale + x_zero).clamp(-128, 127).to(torch.int32)
         x_centered = x_q - x_zero.to(torch.int32)
         w_centered = w_q - w_zero.view(-1, 1)
         acc = torch.einsum("bti,oi->bto", x_centered, w_centered)
         real = acc.to(torch.float32) * x_scale * w_scale.view(1, 1, -1)
         y_q = torch.round(real / y_scale + y_zero).clamp(-128, 127)
         return (y_q - y_zero) * y_scale
+
+    def quantize_o_proj_input(self, hidden_states: Tensor) -> Tensor:
+        if self.o_proj_input_scale is None or self.o_proj_input_zero_point is None:
+            raise RuntimeError("o_proj input quantization metadata has not been hydrated.")
+
+        x_scale = self.o_proj_input_scale.to(device=hidden_states.device, dtype=torch.float32)
+        x_zero = self.o_proj_input_zero_point.to(device=hidden_states.device, dtype=torch.float32)
+        return torch.round(hidden_states.to(torch.float32) / x_scale + x_zero).clamp(-128, 127).to(torch.int32)
 
     def forward(
         self,
