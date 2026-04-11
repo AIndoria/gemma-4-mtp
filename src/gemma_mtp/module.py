@@ -32,6 +32,52 @@ class ExternalAttentionAdapter(nn.Module):
         self.query_norm = RMSNorm(spec.query_head_dim)
         self.q_proj = nn.Linear(model_dim, self.q_out_dim, bias=False)
         self.o_proj = nn.Linear(self.q_out_dim, model_dim, bias=False)
+        self.register_buffer("o_proj_input_scale", None, persistent=False)
+        self.register_buffer("o_proj_input_zero_point", None, persistent=False)
+        self.register_buffer("o_proj_weight_q", None, persistent=False)
+        self.register_buffer("o_proj_weight_scale", None, persistent=False)
+        self.register_buffer("o_proj_weight_zero_point", None, persistent=False)
+        self.register_buffer("o_proj_output_scale", None, persistent=False)
+        self.register_buffer("o_proj_output_zero_point", None, persistent=False)
+
+    def set_o_proj_quantization(
+        self,
+        *,
+        input_scale: Tensor,
+        input_zero_point: Tensor,
+        weight_q: Tensor,
+        weight_scale: Tensor,
+        weight_zero_point: Tensor,
+        output_scale: Tensor,
+        output_zero_point: Tensor,
+    ) -> None:
+        self.o_proj_input_scale = input_scale
+        self.o_proj_input_zero_point = input_zero_point
+        self.o_proj_weight_q = weight_q
+        self.o_proj_weight_scale = weight_scale
+        self.o_proj_weight_zero_point = weight_zero_point
+        self.o_proj_output_scale = output_scale
+        self.o_proj_output_zero_point = output_zero_point
+
+    def o_proj_forward(self, hidden_states: Tensor) -> Tensor:
+        if self.o_proj_weight_q is None or self.o_proj_weight_scale is None:
+            return self.o_proj(hidden_states)
+
+        x_scale = self.o_proj_input_scale.to(device=hidden_states.device, dtype=torch.float32)
+        x_zero = self.o_proj_input_zero_point.to(device=hidden_states.device, dtype=torch.float32)
+        w_q = self.o_proj_weight_q.to(device=hidden_states.device, dtype=torch.int32)
+        w_scale = self.o_proj_weight_scale.to(device=hidden_states.device, dtype=torch.float32)
+        w_zero = self.o_proj_weight_zero_point.to(device=hidden_states.device, dtype=torch.int32)
+        y_scale = self.o_proj_output_scale.to(device=hidden_states.device, dtype=torch.float32)
+        y_zero = self.o_proj_output_zero_point.to(device=hidden_states.device, dtype=torch.float32)
+
+        x_q = torch.round(hidden_states.to(torch.float32) / x_scale + x_zero).clamp(-128, 127).to(torch.int32)
+        x_centered = x_q - x_zero.to(torch.int32)
+        w_centered = w_q - w_zero.view(-1, 1)
+        acc = torch.einsum("bti,oi->bto", x_centered, w_centered)
+        real = acc.to(torch.float32) * x_scale * w_scale.view(1, 1, -1)
+        y_q = torch.round(real / y_scale + y_zero).clamp(-128, 127)
+        return (y_q - y_zero) * y_scale
 
     def forward(
         self,
@@ -112,7 +158,7 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
             self.spec.query_head_dim,
         )
         context = context.permute(0, 2, 1, 3, 4).reshape(batch_size, steps, -1)
-        return self.o_proj(context)
+        return self.o_proj_forward(context)
 
 
 class RMSNorm(nn.Module):

@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 import torch
 
-from gemma_mtp import GemmaMtpDrafter, TFLiteModelReader, build_partial_state_dict, infer_config_from_graph_export
+from gemma_mtp import (
+    GemmaMtpDrafter,
+    TFLiteModelReader,
+    build_partial_state_dict,
+    hydrate_runtime_quantization,
+    infer_config_from_graph_export,
+)
 from gemma_mtp.runtime_attention import (
     apply_query_rope,
     exact_attention_context,
@@ -132,6 +138,7 @@ def main() -> None:
     model = GemmaMtpDrafter(config)
     state_dict = build_partial_state_dict(args.graph_json, args.tflite_model)
     model.load_state_dict(state_dict, strict=False)
+    hydrate_runtime_quantization(model, args.graph_json, args.tflite_model)
     
     for pos_val in [100, 700]:
         print(f"\n--- Testing position {pos_val} ---")
@@ -179,7 +186,7 @@ def main() -> None:
             
             # Current PyTorch o_proj path from our recovered context packing.
             ctx_reshaped = my_ctx_adapter.reshape(1, 1, 1024)
-            attn_out_manual = block0.attention.o_proj(ctx_reshaped)
+            attn_out_manual = block0.attention.o_proj_forward(ctx_reshaped)
             _compare("block0.attn_out_CURRENT", attn_out_manual, t_attn_out)
 
             # Verify whether the rest of the block matches once TFLite's own

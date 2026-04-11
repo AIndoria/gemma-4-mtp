@@ -13,6 +13,7 @@ from gemma_mtp import (
     TFLiteModelReader,
     ZeroAttentionAdapter,
     build_partial_state_dict,
+    hydrate_runtime_quantization,
     infer_config_from_graph_export,
 )
 
@@ -92,6 +93,8 @@ def _run_pytorch(
     if zero_attention:
         for block in model.blocks:
             block.attention = ZeroAttentionAdapter(block.attention.spec, config.model_dim)
+    else:
+        hydrate_runtime_quantization(model, graph_json, tflite_model)
 
     reader = TFLiteModelReader(tflite_model)
     with torch.no_grad():

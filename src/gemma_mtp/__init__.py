@@ -14,12 +14,13 @@ __all__ = [
 ]
 
 try:
-    from .convert import build_partial_state_dict
+    from .convert import build_partial_state_dict, hydrate_runtime_quantization
     from .tflite_loader import QuantizationInfo, TFLiteModelReader, TensorInfo
 
     __all__.extend(
         [
             "build_partial_state_dict",
+            "hydrate_runtime_quantization",
             "QuantizationInfo",
             "TFLiteModelReader",
             "TensorInfo",
