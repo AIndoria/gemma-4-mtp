@@ -37,8 +37,9 @@ def resolve_local_window_bounds(
     window_size: int,
     param_tensor: Tensor | None = None,
 ) -> tuple[int, int]:
-    # The physical buffer for local attention blocks (0-2) is fixed at 0:512.
-    return 0, window_size
+    start = max(0, position + 1 - window_size)
+    end = min(context_size, start + window_size)
+    return start, end
 
 
 def resolve_mask_bounds(
@@ -181,17 +182,17 @@ def exact_attention_context(
     context_size = key_cache.shape[-2]
     if spec.local_window_size is not None:
         position = resolve_decode_position(input_pos, param_tensor, context_size)
+        window_start, window_end = resolve_local_window_bounds(
+            position,
+            context_size=context_size,
+            window_size=spec.local_window_size,
+            param_tensor=param_tensor,
+        )
         local_mask = build_local_window_mask(
             position,
             context_size=context_size,
             window_size=spec.local_window_size,
             device=q.device,
-            param_tensor=param_tensor,
-        )
-        window_start, window_end = resolve_local_window_bounds(
-            position,
-            context_size=context_size,
-            window_size=spec.local_window_size,
             param_tensor=param_tensor,
         )
     else:

@@ -109,7 +109,7 @@ def _generate_synthetic_inputs(config: MtpDrafterConfig, input_pos_val: int = 70
     window_start = max(0, input_pos_val + 1 - 512)
     window_end = input_pos_val + 1
     param_tensor = np.zeros((1, 1, 1, 7), dtype=np.int32)
-    param_tensor[0, 0, 0, 0] = window_start
+    param_tensor[0, 0, 0, 0] = input_pos_val
     param_tensor[0, 0, 0, 1] = window_end
     param_tensor[0, 0, 0, 2] = window_end
 

@@ -38,7 +38,7 @@ def _build_synthetic_inputs(
     window_end = decode_position + 1
 
     param_tensor = np.zeros((1, 1, 1, 7), dtype=np.int32)
-    param_tensor[0, 0, 0, 0] = window_start
+    param_tensor[0, 0, 0, 0] = decode_position
     param_tensor[0, 0, 0, 1] = window_end
     param_tensor[0, 0, 0, 2] = window_end
 
