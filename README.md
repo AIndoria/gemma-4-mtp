@@ -53,7 +53,8 @@ What exists today:
 ## Current Status
 
 The reverse-engineered PyTorch port is now very close to the real LiteRT
-runtime on the tested decode positions.
+runtime on the tested decode positions, and the current stress sweep now lands
+cleanly on all checked cases.
 
 Latest checked parity:
 
@@ -71,6 +72,17 @@ Latest checked parity:
   - top-1 match `True`
 
 The detailed running log and current caveats live in `docs/findings.md`.
+
+Latest sweep result:
+
+- positions `50`, `700`, `1000`, `1500`
+- seeds `0-4`
+- top-1 matches `20/20`
+- minimum logits cosine `0.9885`
+- minimum projected activations cosine `0.9817`
+
+The last meaningful runtime fix was a layer-1 RoPE precision detail at deeper
+decode positions.
 
 ## License
 

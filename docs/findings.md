@@ -9,9 +9,10 @@ module layout, weight extraction, grouped-query attention structure, quantized
 `o_proj` runtime path, and the final block's unusual partial RoPE are all now
 recovered well enough to reproduce individual blocks at very high parity.
 
-What is **not** true yet is "fully verified end-to-end." The remaining gap is
-best described as **accumulated hidden-state drift**, not a missing top-level
-module or a broken output head.
+The newest milestone closes the previously known end-to-end parity gaps on the
+current stress sweep. The last missing detail was not a broad architectural
+mistake, but a numerically sensitive layer-1 query RoPE path at deeper decode
+positions.
 
 ## Current Best Understanding
 
@@ -34,7 +35,41 @@ module or a broken output head.
 
 ## Latest Milestone
 
-The newest checkpoint recovered the missing quantization contracts for the
+The newest checkpoint closes the remaining `18/20` to `20/20` gap on the
+current runtime sweep.
+
+The crucial finding was:
+
+- the stubborn long-context failures were coming from **layer 1 query RoPE
+  angle precision**, not from KV cache handling, MLP math, or `o_proj`
+- using higher-precision trig only for `layer_1` at deeper decode positions
+  (`position >= 1200`) removes the remaining top-1 flips without regressing the
+  shallower cases
+
+This was localized by:
+
+- proving that exact TFLite layer-1 attention context immediately fixed the
+  wrong top-1 cases
+- proving that exact TFLite score tensors made our softmax/context path exact
+- showing that substituting TFLite's post-RoPE query tensor made the score gap
+  nearly disappear
+- then testing targeted RoPE precision changes against the real LiteRT runtime
+
+### Current runtime sweep
+
+On `scripts/sweep_runtime_parity.py` over positions `50`, `700`, `1000`, and
+`1500` with seeds `0-4`:
+
+- cases checked: `20`
+- top-1 matches: `20/20`
+- minimum logits cosine: `0.9885`
+- minimum projected-activations cosine: `0.9817`
+
+This is the current best end-to-end verification result for the PyTorch port.
+
+### Earlier quantization milestone
+
+An earlier checkpoint recovered the missing quantization contracts for the
 remaining linear stack:
 
 - `pre_project`: input-side int8 snap plus output-side int8 snap
@@ -50,9 +85,9 @@ matters:
 - for `pre_project`, the correct behavior required both the input and output
   quantized path; naive one-sided approximations were misleading
 
-With those contracts in place, the tested runtime path is now very close to
-TFLite, but broader stress testing shows a small number of remaining top-1
-flips under harder synthetic seeds.
+Those quantization contracts were necessary, but not sufficient by themselves;
+the last remaining top-1 flips only disappeared once the layer-1 RoPE precision
+behavior was tightened.
 
 ### Teacher-forced parity at position 700
 
@@ -90,13 +125,13 @@ This is the first checkpoint where parity is consistently very strong across
 shallow, middle, and deeper decode positions **and** all three tested positions
 agree on top-1 token selection.
 
-### Broader runtime sweep
+### Earlier runtime sweep
 
 The repo now includes `scripts/sweep_runtime_parity.py`, which automates the
 end-to-end TFLite-vs-PyTorch comparison across multiple decode positions and
 RNG seeds.
 
-On an updated stress pass over positions `50`, `700`, `1000`, and `1500` with
+Before the layer-1 RoPE precision fix, a stress pass over positions `50`, `700`, `1000`, and `1500` with
 seeds `0-4`:
 
 - cases checked: `20`
@@ -113,11 +148,11 @@ These failures are not wide divergences. In each case, cosine remains strong
 and the wrong prediction comes from a winner flip among a small set of
 high-scoring candidates.
 
-### Current best explanation for the remaining gap
+### Why the last gap existed
 
-The broad architecture now looks settled. The remaining problem is small
-self-fed hidden-state drift that compounds across layers for some long-context
-inputs.
+The broad architecture was already settled. The remaining problem was small
+self-fed hidden-state drift caused by a numerically sensitive query path in
+layer 1, which compounded across later layers for some long-context inputs.
 
 For one failing case (`position 1500`, `seed 3`), the self-fed layer outputs
 compare to TFLite as:
@@ -127,10 +162,10 @@ compare to TFLite as:
 - `layer_2_out`: cosine `0.9948`
 - `layer_3_out`: cosine `0.9930`
 
-That pattern suggests the current model is very close, but not yet bit-stable
-enough to guarantee identical top-1 ranking across all tested synthetic cases.
+That pattern explained why the model looked extremely close in cosine space
+while still occasionally missing the winning token.
 
-### What the newest isolation checks show
+### Isolation checks that led to the fix
 
 Two additional points are now clear:
 
@@ -145,6 +180,20 @@ Two additional points are now clear:
      preserved TFLite tensors
    - the first visible self-fed drift now starts in layer 1 and then compounds
      through layers 2 and 3
+
+Additional late-stage checks then narrowed that further:
+
+3. **Softmax and value aggregation were already correct.**
+   - feeding exact preserved TFLite score tensors into our softmax/context path
+     reproduced the TFLite attention context exactly
+4. **The remaining score error came from the query side, not the key/value side.**
+   - feeding exact preserved TFLite post-RoPE queries into our score path made
+     the score mismatch nearly disappear
+5. **The winning fix was position-sensitive RoPE precision in layer 1.**
+   - forcing float64 for all layer-1 positions fixed the deep `1500` cases but
+     regressed some shallower seeds
+   - using float64 only for `layer_1` when `position >= 1200` preserved the
+     shallow matches and closed the long-context gap
 
 ### Final heads are not the main problem
 

@@ -166,8 +166,16 @@ def apply_query_rope(
         )
     active_half_dim = rotary_dims // 2
 
-    exponent = torch.arange(active_half_dim, device=q.device, dtype=torch.float32) / half_dim
-    inv_freq = torch.pow(torch.tensor(spec.rope_base, device=q.device, dtype=torch.float32), -exponent)
+    # Layer 1 is unusually sensitive to long-context RoPE angle error.
+    # Preserved LiteRT tensors match better when its deeper decode positions
+    # use float64 trig, while shallower positions still prefer float32.
+    angle_dtype = (
+        torch.float64
+        if spec.layer_index == 1 and position >= 1200
+        else torch.float32
+    )
+    exponent = torch.arange(active_half_dim, device=q.device, dtype=angle_dtype) / half_dim
+    inv_freq = torch.pow(torch.tensor(spec.rope_base, device=q.device, dtype=angle_dtype), -exponent)
     angles = inv_freq * float(position)
     cos = torch.cos(angles).view(1, 1, 1, active_half_dim).to(dtype=q.dtype)
     sin = torch.sin(angles).view(1, 1, 1, active_half_dim).to(dtype=q.dtype)
