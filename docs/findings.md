@@ -1,47 +1,111 @@
 # Findings
 
-Date: 2026-04-10
+Date: 2026-04-11
 
-## Summary
+## Current Status
 
-The extracted Gemma 4 `mtp_drafter` architecture is now fully verified end-to-end for a single block, achieving **0.988** cosine similarity against the original TFLite runtime.
+The reconstruction is no longer in the "mystery architecture" phase. The main
+module layout, weight extraction, grouped-query attention structure, quantized
+`o_proj` runtime path, and the final block's unusual partial RoPE are all now
+recovered well enough to reproduce individual blocks at very high parity.
 
-### Key Architectural Discoveries (Final)
+What is **not** true yet is "fully verified end-to-end." The remaining gap is
+best described as **accumulated hidden-state drift**, not a missing top-level
+module or a broken output head.
 
-1.  **Block Topology:** Verified. Gemma 4 MTP blocks apply "post" norms to branches *before* the residual addition.
-    *   `hidden = hidden + post_attn_norm(attn(pre_attn_norm(hidden)))`
-    *   `hidden = hidden + post_ffw_norm(mlp(pre_ffw_norm(hidden)))`
-2.  **MLP Structure:** Confirmed **GEGLU** using approximate **GELU** (tanh approximation).
-    *   `mlp(x) = down_proj(quant(GELU(gate_proj(x)) * up_proj(x)))`
-3.  **Attention Window:** Confirmed **Fixed 512-token window at start of cache** (`0:512`). It does not slide.
-4.  **Model Dimensions:** Confirmed:
-    *   `model_dim`: 256
-    *   `mlp_hidden_dim`: 2048
-    *   `head_dim`: 256
-    *   `query_heads`: 4
-    *   `kv_heads`: 2
+## Current Best Understanding
 
-### Parity Status
+1. **Block topology is verified.**
+   - `hidden = hidden + post_attn_norm(attn(pre_attn_norm(hidden)))`
+   - `hidden = hidden + post_ffw_norm(mlp(pre_ffw_norm(hidden)))`
+2. **MLP structure is verified as GEGLU with tanh-approx GELU.**
+3. **Attention partitioning is verified.**
+   - layers `0-2` use `kv_cache_{k,v}_22`
+   - layer `3` uses `kv_cache_{k,v}_23`
+4. **Windowing is verified as sliding logical attention over the raw cache.**
+   - local layers attend to `position - 511 <= key_index <= position`
+   - the LiteRT `runtime_bmm` subgraphs derive the slice start from the decode
+     position, not from a fixed `0:512` window
+5. **Final-block RoPE is only partially active.**
+   - the layer-3 RoPE constant has length `256`, but only the first `64`
+     frequencies are non-zero
+   - in practice this means the last block rotates only the first `64` dims of
+     each 256-d half, i.e. `128` total rotary dims inside a `512`-wide head
 
-| Component | Cosine Similarity | Status |
-| :--- | :--- | :--- |
-| Pre-Projection | 0.999 | Verified |
-| Query Path | 0.999 | Verified |
-| Attention Scores | 0.996 | Verified (Fixed 0:512) |
-| Attention Context | 0.999 | Verified |
-| MLP Branch | 0.987 | Verified (GEGLU + Approx GELU) |
-| Block Output | 0.988 | **ARCHITECTURALLY VERIFIED** |
+## Latest Milestone
 
-## Implementation Details
+The most recent checkpoint recovered the last block's partial RoPE and verified
+that the remaining mismatch is not in the final logits head.
 
-The `GemmaMtpDrafter` PyTorch module now accurately reflects the TFLite graph. All 44 linear and normalization weights are correctly mapped and can be exported to a standard `.pt` state dict.
+### Teacher-forced parity at position 700
 
-## Next Steps
+Using exact TFLite hidden states as inputs:
 
-1.  **Resolve o_proj Parity:** Identify why the attention branch output (after linear projection) drops to 0.0 similarity despite a perfect context match.
-2.  **MLP Verification:** Confirm GEGLU implementation details and activation function approximation.
-3.  **Circular Updates:** Verify if the fixed 512-token window uses circular overwriting once the initial buffer is filled.
-4.  **Full State Dict:** A complete state dict with 44/44 keys has been exported to `data/derived/mtp_partial_state_dict.pt`.
+- `layer_1.block_out`: cosine `0.9861`
+- `layer_2.block_out`: cosine `0.9995`
+- `layer_3.query_rope`: cosine `0.9996`
+- `layer_3.attn_context`: cosine `0.9983`
+- `layer_3.attn_out`: cosine `0.9942`
+- `layer_3.block_out`: cosine `0.9995`
+
+This is strong evidence that the recovered block topology, grouped-query
+attention path, quantized `o_proj`, and final-block partial RoPE are all
+substantially correct.
+
+### End-to-end parity snapshot
+
+Using `scripts/compare_tflite_runtime.py` on current code:
+
+- position `50`
+  - logits cosine: `0.9281`
+  - projected activations cosine: `0.9453`
+  - top-1 match: `True`
+- position `700`
+  - logits cosine: `0.8631`
+  - projected activations cosine: `0.9164`
+  - top-1 match: `False`
+- position `1000`
+  - logits cosine: `0.8490`
+  - projected activations cosine: `0.7074`
+  - top-1 match: `False`
+
+So the model is clearly much closer than before, but still not export-ready as a
+"fully verified" drop-in replacement.
+
+### Final heads are not the main problem
+
+If exact TFLite final hidden states are fed into our recovered output path:
+
+- `final_norm`: cosine `1.0000`
+- `logits_head`: cosine `0.9987`
+- `post_project`: cosine `0.9850`
+
+That means the remaining end-to-end gap is mostly **hidden-state drift inside
+the recurrent block stack**, not a bad final projection.
+
+## Remaining Work
+
+The highest-value unresolved area is reducing the hidden-state drift that starts
+early and compounds across blocks on self-generated inputs.
+
+Current likely candidates:
+
+1. exact block-0/local-attention runtime behavior under the heavier synthetic
+   parity inputs
+2. missing quantize/dequant steps around early linears such as `pre_project`
+3. any other small runtime quantization contracts that do not show up when
+   blocks are teacher-forced but do accumulate during full autoregressive flow
+
+## Implementation Status
+
+- `44/44` known linear/norm parameters are still mapped into
+  `data/derived/mtp_partial_state_dict.pt`
+- the PyTorch scaffold includes:
+  - grouped-query attention over external KV caches
+  - quantized `o_proj` runtime emulation
+  - recovered layer-3 partial rotary behavior
+- the repo also now includes `scripts/compare_teacher_forced_blocks.py` for
+  localizing parity by block using preserved TFLite intermediates
 
 ## Sources Consulted
 
