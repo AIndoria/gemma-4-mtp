@@ -21,6 +21,7 @@ class DrafterOutput:
     logits: Tensor
     projected_activations: Tensor
     hidden_states: Tensor
+    all_hidden_states: list[Tensor] | None = None
 
 
 class ExternalAttentionAdapter(nn.Module):
@@ -55,8 +56,6 @@ class ZeroAttentionAdapter(ExternalAttentionAdapter):
         param_tensor: Tensor | None = None,
     ) -> Tensor:
         del mask, base_kv_cache, input_pos, param_tensor
-        # Keep the linear modules present for weight loading, but return a
-        # no-op attention contribution until cache semantics are reconstructed.
         return torch.zeros_like(hidden_states)
 
 
@@ -202,7 +201,9 @@ class GemmaMtpDrafter(nn.Module):
         input_pos: Tensor | None = None,
         param_tensor: Tensor | None = None,
     ) -> DrafterOutput:
+        all_hidden_states = []
         hidden_states = self.pre_project(activations)
+        all_hidden_states.append(hidden_states)
         for block in self.blocks:
             hidden_states = block(
                 hidden_states,
@@ -211,6 +212,7 @@ class GemmaMtpDrafter(nn.Module):
                 input_pos=input_pos,
                 param_tensor=param_tensor,
             )
+            all_hidden_states.append(hidden_states)
 
         hidden_states = self.final_norm(hidden_states)
         logits = self.logits_head(hidden_states)
@@ -219,4 +221,5 @@ class GemmaMtpDrafter(nn.Module):
             logits=logits,
             projected_activations=projected_activations,
             hidden_states=hidden_states,
+            all_hidden_states=all_hidden_states,
         )

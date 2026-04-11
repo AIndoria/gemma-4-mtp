@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from gemma_mtp import GemmaMtpDrafter, TFLiteModelReader, build_partial_state_dict, infer_config_from_graph_export
 from gemma_mtp.runtime_attention import (
@@ -25,8 +26,14 @@ from gemma_mtp.config import MtpDrafterConfig
 TENSOR_NAMES = (
     "layer_0/layer_0.pre_q/attn.pre_q/attn._pre_attention_query_fn/maybe_rope/concatenate",
     "layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite",
+    "layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/div;layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/exp;layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/broadcast_in_dim;layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/reduce_sum;layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/reduce_max;layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/max;layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/sub",
     "layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1",
+    "layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/composite",
+    "layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/composite1",
     "layer_0/layer_0.post_qkv/add1",
+    "layer_3/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite",
+    "layer_3/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1",
+    "layer_3/layer_3.post_qkv/attn.post_qkv/attn_vec_einsum/composite1",
 )
 
 
@@ -152,24 +159,78 @@ def main() -> None:
             q = block0.attention.q_proj(pre_attn).view(1, 1, 4, 256)
             q_norm = block0.attention.query_norm(q)
             q_rope = apply_query_rope(q_norm, spec=block0.attention.spec, input_pos=torch.from_numpy(inputs["input_pos"]), param_tensor=torch.from_numpy(inputs["param_tensor"]))
-            
-            _compare("block0.query_rope", q_rope, tflite_outputs["layer_0/layer_0.pre_q/attn.pre_q/attn._pre_attention_query_fn/maybe_rope/concatenate"])
-            
-            # Scores verification (Fixed window at 0:512)
-            k_cache = resolve_cache_tensor(cache, block0.attention.spec.key_cache_name or "")
             q_grouped = reshape_grouped_query(q_rope.reshape(1, 1, -1), spec=block0.attention.spec)
-            my_scores = torch.einsum("bhqd,bhkd->bhqk", q_grouped, k_cache[..., :512, :])
             
-            t_scores = tflite_outputs["layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite"]
-            _compare("block0.attn_scores_0:512", my_scores, t_scores[..., :512])
+            _compare("block0.query_rope", q_rope, tflite_outputs[TENSOR_NAMES[0]])
             
-            # Context verification (Fixed window at 0:512)
-            v_cache = resolve_cache_tensor(cache, block0.attention.spec.value_cache_name or "")
-            t_probs = torch.softmax(torch.from_numpy(t_scores[..., :512]), dim=-1)
-            my_ctx = torch.einsum("bhqk,bhdk->bhqd", t_probs, v_cache[..., :512])
+            # Adapter verification
+            t_ctx = tflite_outputs[TENSOR_NAMES[3]]
+            my_ctx_adapter = exact_attention_context(
+                q_grouped,
+                spec=block0.attention.spec,
+                key_cache=resolve_cache_tensor(cache, block0.attention.spec.key_cache_name or ""),
+                value_cache=resolve_cache_tensor(cache, block0.attention.spec.value_cache_name or ""),
+                input_pos=torch.from_numpy(inputs["input_pos"]),
+                param_tensor=torch.from_numpy(inputs["param_tensor"]),
+            )
+            _compare("block0.attn_context_ADAPTER", my_ctx_adapter, t_ctx)
             
-            t_ctx = tflite_outputs["layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1"]
-            _compare("block0.attn_context_0:512", my_ctx, t_ctx)
+            # Attn out verification
+            t_attn_out = tflite_outputs[TENSOR_NAMES[5]]
+            
+            # Manual attn out with HQ order
+            ctx_reshaped = my_ctx_adapter.reshape(1, 1, 1024)
+            attn_out_manual = block0.attention.o_proj(ctx_reshaped)
+            _compare("block0.attn_out_CURRENT", attn_out_manual, t_attn_out)
+
+            # Whole block verification
+            block0_out = tflite_outputs[TENSOR_NAMES[6]]
+            # Use model() instead of block() to check everything
+            model_out = model(
+                torch.from_numpy(inputs["activations"]),
+                mask=torch.from_numpy(inputs["mask"]),
+                base_kv_cache=cache,
+                input_pos=torch.from_numpy(inputs["input_pos"]),
+                param_tensor=torch.from_numpy(inputs["param_tensor"]),
+            )
+            # all_hidden_states[0] is pre_project
+            # all_hidden_states[1] is block 0 output
+            _compare("model.block0_output", model_out.all_hidden_states[1], block0_out)
+
+            
+            # Block 3 verification
+            block3 = model.blocks[3]
+            # Block 3 input is hidden_states after block 2.
+            # But we can just use random input to see if context and out match.
+            b3_in = torch.randn(1, 1, 256)
+            
+            q3 = block3.attention.q_proj(block3.pre_attn_norm(b3_in)).view(1, 1, 4, 512)
+            q3_norm = block3.attention.query_norm(q3)
+            q3_rope = apply_query_rope(q3_norm, spec=block3.attention.spec, input_pos=torch.from_numpy(inputs["input_pos"]), param_tensor=torch.from_numpy(inputs["param_tensor"]))
+            q3_grouped = reshape_grouped_query(q3_rope.reshape(1, 1, -1), spec=block3.attention.spec)
+            
+            # For Block 3, it's global attention (local_window_size is None)
+            my_ctx3 = exact_attention_context(
+                q3_grouped,
+                spec=block3.attention.spec,
+                key_cache=resolve_cache_tensor(cache, block3.attention.spec.key_cache_name or ""),
+                value_cache=resolve_cache_tensor(cache, block3.attention.spec.value_cache_name or ""),
+                input_pos=torch.from_numpy(inputs["input_pos"]),
+                mask=torch.from_numpy(inputs["mask"]),
+                param_tensor=torch.from_numpy(inputs["param_tensor"]),
+            )
+            # Wait, Block 3 uses TENSOR_NAMES[8] for context and [9] for attn_out
+            t_ctx3 = tflite_outputs[TENSOR_NAMES[8]]
+            # We can't match context because our b3_in is random!
+            # But we can check if TFLite's internal context matches our o_proj.
+            
+            t_ctx3_torch = torch.from_numpy(t_ctx3)
+            # Block 3 head_dim=512. queries_per_kv=2. kv_heads=2.
+            # 2 * 2 * 512 = 2048.
+            ctx3_reshaped = t_ctx3_torch.reshape(1, 1, 2048)
+            attn_out3_manual = block3.attention.o_proj(ctx3_reshaped)
+            t_attn_out3 = tflite_outputs[TENSOR_NAMES[9]]
+            _compare("block3.attn_out", attn_out3_manual, t_attn_out3)
 
 
 if __name__ == "__main__":
