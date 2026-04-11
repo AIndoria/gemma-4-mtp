@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import itertools
 import os
 import subprocess
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from gemma_mtp import GemmaMtpDrafter, TFLiteModelReader, build_partial_state_dict, infer_config_from_graph_export
 from gemma_mtp.runtime_attention import (
     apply_query_rope,
     exact_attention_context,
-    prepare_key_cache,
-    prepare_value_cache,
     reshape_grouped_query,
     resolve_cache_tensor,
 )
@@ -30,6 +25,10 @@ TENSOR_NAMES = (
     "layer_0/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1",
     "layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/composite",
     "layer_0/layer_0.post_qkv/attn.post_qkv/attn_vec_einsum/composite1",
+    "layer_0/layer_0.post_qkv/post_attention_norm/composite",
+    "layer_0/layer_0.post_qkv/pre_ffw_norm/composite",
+    "layer_0/layer_0.post_qkv/mlp/linear/composite1",
+    "layer_0/layer_0.post_qkv/post_ffw_norm/composite",
     "layer_0/layer_0.post_qkv/add1",
     "layer_3/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite",
     "layer_3/attn.dot_product_attention/attn.dot_product_attention_extensible/dot_attn/dot_attn._qkv_fn/composite1",
@@ -178,14 +177,43 @@ def main() -> None:
             # Attn out verification
             t_attn_out = tflite_outputs[TENSOR_NAMES[5]]
             
-            # Manual attn out with HQ order
+            # Current PyTorch o_proj path from our recovered context packing.
             ctx_reshaped = my_ctx_adapter.reshape(1, 1, 1024)
             attn_out_manual = block0.attention.o_proj(ctx_reshaped)
             _compare("block0.attn_out_CURRENT", attn_out_manual, t_attn_out)
 
-            # Whole block verification
-            block0_out = tflite_outputs[TENSOR_NAMES[6]]
-            # Use model() instead of block() to check everything
+            # Verify whether the rest of the block matches once TFLite's own
+            # attention-branch output is injected.
+            block0_out = tflite_outputs["layer_0/layer_0.post_qkv/add1"]
+            post_attn_from_tattnout = block0.post_attn_norm(torch.from_numpy(t_attn_out))
+            hidden_after_attn = pre_project + post_attn_from_tattnout
+            pre_ffw_from_tattnout = block0.pre_ffw_norm(hidden_after_attn)
+            mlp_out_from_tattnout = block0.mlp(pre_ffw_from_tattnout)
+            post_ffw_from_tattnout = block0.post_ffw_norm(mlp_out_from_tattnout)
+            block_out_from_tattnout = hidden_after_attn + post_ffw_from_tattnout
+            _compare(
+                "block0.post_attn_from_tattnout",
+                post_attn_from_tattnout,
+                tflite_outputs["layer_0/layer_0.post_qkv/post_attention_norm/composite"],
+            )
+            _compare(
+                "block0.pre_ffw_from_tattnout",
+                pre_ffw_from_tattnout,
+                tflite_outputs["layer_0/layer_0.post_qkv/pre_ffw_norm/composite"],
+            )
+            _compare(
+                "block0.mlp_out_from_tattnout",
+                mlp_out_from_tattnout,
+                tflite_outputs["layer_0/layer_0.post_qkv/mlp/linear/composite1"],
+            )
+            _compare(
+                "block0.post_ffw_from_tattnout",
+                post_ffw_from_tattnout,
+                tflite_outputs["layer_0/layer_0.post_qkv/post_ffw_norm/composite"],
+            )
+            _compare("block0.out_from_tattnout", block_out_from_tattnout, block0_out)
+
+            # Use model() instead of block() to check the current full branch.
             model_out = model(
                 torch.from_numpy(inputs["activations"]),
                 mask=torch.from_numpy(inputs["mask"]),
@@ -193,44 +221,7 @@ def main() -> None:
                 input_pos=torch.from_numpy(inputs["input_pos"]),
                 param_tensor=torch.from_numpy(inputs["param_tensor"]),
             )
-            # all_hidden_states[0] is pre_project
-            # all_hidden_states[1] is block 0 output
             _compare("model.block0_output", model_out.all_hidden_states[1], block0_out)
-
-            
-            # Block 3 verification
-            block3 = model.blocks[3]
-            # Block 3 input is hidden_states after block 2.
-            # But we can just use random input to see if context and out match.
-            b3_in = torch.randn(1, 1, 256)
-            
-            q3 = block3.attention.q_proj(block3.pre_attn_norm(b3_in)).view(1, 1, 4, 512)
-            q3_norm = block3.attention.query_norm(q3)
-            q3_rope = apply_query_rope(q3_norm, spec=block3.attention.spec, input_pos=torch.from_numpy(inputs["input_pos"]), param_tensor=torch.from_numpy(inputs["param_tensor"]))
-            q3_grouped = reshape_grouped_query(q3_rope.reshape(1, 1, -1), spec=block3.attention.spec)
-            
-            # For Block 3, it's global attention (local_window_size is None)
-            my_ctx3 = exact_attention_context(
-                q3_grouped,
-                spec=block3.attention.spec,
-                key_cache=resolve_cache_tensor(cache, block3.attention.spec.key_cache_name or ""),
-                value_cache=resolve_cache_tensor(cache, block3.attention.spec.value_cache_name or ""),
-                input_pos=torch.from_numpy(inputs["input_pos"]),
-                mask=torch.from_numpy(inputs["mask"]),
-                param_tensor=torch.from_numpy(inputs["param_tensor"]),
-            )
-            # Wait, Block 3 uses TENSOR_NAMES[8] for context and [9] for attn_out
-            t_ctx3 = tflite_outputs[TENSOR_NAMES[8]]
-            # We can't match context because our b3_in is random!
-            # But we can check if TFLite's internal context matches our o_proj.
-            
-            t_ctx3_torch = torch.from_numpy(t_ctx3)
-            # Block 3 head_dim=512. queries_per_kv=2. kv_heads=2.
-            # 2 * 2 * 512 = 2048.
-            ctx3_reshaped = t_ctx3_torch.reshape(1, 1, 2048)
-            attn_out3_manual = block3.attention.o_proj(ctx3_reshaped)
-            t_attn_out3 = tflite_outputs[TENSOR_NAMES[9]]
-            _compare("block3.attn_out", attn_out3_manual, t_attn_out3)
 
 
 if __name__ == "__main__":
