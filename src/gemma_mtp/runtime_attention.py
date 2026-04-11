@@ -37,16 +37,19 @@ def resolve_local_window_bounds(
     window_size: int,
     param_tensor: Tensor | None = None,
 ) -> tuple[int, int]:
-    if param_tensor is not None:
-        # In the mtp_drafter TFLite graph, param_tensor[0] defines the window start.
-        # This is typically max(0, decode_position + 1 - 512).
-        start = int(param_tensor.flatten()[0].item())
-        return start, start + window_size
-    
-    # Fallback to standard sliding window if param_tensor is missing
-    end = min(position + 1, context_size)
-    start = max(0, end - window_size)
-    return start, end
+    # The physical buffer for local attention blocks (0-2) is fixed at 0:512.
+    return 0, window_size
+
+
+def resolve_mask_bounds(
+    position: int,
+    *,
+    context_size: int,
+    window_size: int,
+) -> tuple[int, int]:
+    # The mask slides with the position: [pos - 511, pos]
+    start = max(0, position + 1 - window_size)
+    return start, position + 1
 
 
 def build_local_window_mask(
@@ -58,12 +61,7 @@ def build_local_window_mask(
     param_tensor: Tensor | None = None,
 ) -> Tensor:
     indices = torch.arange(context_size, device=device, dtype=torch.int64).view(1, 1, 1, -1)
-    start, end = resolve_local_window_bounds(
-        position, 
-        context_size=context_size, 
-        window_size=window_size,
-        param_tensor=param_tensor
-    )
+    start, end = resolve_mask_bounds(position, context_size=context_size, window_size=window_size)
     # The mask should be true for indices in [start, end)
     # AND indices <= position (causal)
     in_window = (indices >= start) & (indices < end)

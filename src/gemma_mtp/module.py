@@ -108,16 +108,16 @@ class GroupedQueryAttentionAdapter(ExternalAttentionAdapter):
         context = context.reshape(
             batch_size,
             self.spec.kv_heads,
-            self.spec.queries_per_kv,
             steps,
+            self.spec.queries_per_kv,
             self.spec.query_head_dim,
         )
-        context = context.permute(0, 3, 1, 2, 4).reshape(batch_size, steps, -1)
+        context = context.permute(0, 2, 1, 3, 4).reshape(batch_size, steps, -1)
         return self.o_proj(context)
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
