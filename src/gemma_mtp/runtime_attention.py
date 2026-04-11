@@ -157,15 +157,27 @@ def apply_query_rope(
 
     position = resolve_decode_position(input_pos, param_tensor, context_size=32003)
     half_dim = spec.query_head_dim // 2
+    rotary_dims = spec.rope_rotary_dims or spec.query_head_dim
+    if rotary_dims % 2 != 0:
+        raise ValueError(f"RoPE rotary dims must be even, got {rotary_dims}")
+    if rotary_dims > spec.query_head_dim:
+        raise ValueError(
+            f"RoPE rotary dims {rotary_dims} exceed head dim {spec.query_head_dim}"
+        )
+    active_half_dim = rotary_dims // 2
 
-    exponent = torch.arange(half_dim, device=q.device, dtype=torch.float32) / half_dim
+    exponent = torch.arange(active_half_dim, device=q.device, dtype=torch.float32) / half_dim
     inv_freq = torch.pow(torch.tensor(spec.rope_base, device=q.device, dtype=torch.float32), -exponent)
     angles = inv_freq * float(position)
-    cos = torch.cos(angles).view(1, 1, 1, half_dim).to(dtype=q.dtype)
-    sin = torch.sin(angles).view(1, 1, 1, half_dim).to(dtype=q.dtype)
+    cos = torch.cos(angles).view(1, 1, 1, active_half_dim).to(dtype=q.dtype)
+    sin = torch.sin(angles).view(1, 1, 1, active_half_dim).to(dtype=q.dtype)
 
-    q1, q2 = q[..., :half_dim], q[..., half_dim:]
-    return torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+    q1, q2 = q[..., :half_dim].clone(), q[..., half_dim:].clone()
+    q1_active = q1[..., :active_half_dim].clone()
+    q2_active = q2[..., :active_half_dim].clone()
+    q1[..., :active_half_dim] = q1_active * cos - q2_active * sin
+    q2[..., :active_half_dim] = q1_active * sin + q2_active * cos
+    return torch.cat([q1, q2], dim=-1)
 
 
 def exact_attention_context(
