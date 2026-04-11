@@ -35,10 +35,18 @@ def resolve_local_window_bounds(
     *,
     context_size: int,
     window_size: int,
+    param_tensor: Tensor | None = None,
 ) -> tuple[int, int]:
-    # In the mtp_drafter TFLite graph, the local window is fixed at [0, window_size]
-    # and does not slide with position. The 32003 cache size is a placeholder.
-    return 0, window_size
+    if param_tensor is not None:
+        # In the mtp_drafter TFLite graph, param_tensor[0] defines the window start.
+        # This is typically max(0, decode_position + 1 - 512).
+        start = int(param_tensor.flatten()[0].item())
+        return start, start + window_size
+    
+    # Fallback to standard sliding window if param_tensor is missing
+    end = min(position + 1, context_size)
+    start = max(0, end - window_size)
+    return start, end
 
 
 def build_local_window_mask(
@@ -47,15 +55,20 @@ def build_local_window_mask(
     context_size: int,
     window_size: int,
     device: torch.device,
+    param_tensor: Tensor | None = None,
 ) -> Tensor:
-    # Fixed window at [0, window_size].
-    # Within this window, we can only attend up to 'position'.
-    indices = torch.arange(context_size, device=device, dtype=torch.int64)
-    # 1. Must be in [0, window_size)
-    in_window = indices < window_size
-    # 2. Must be <= position
+    indices = torch.arange(context_size, device=device, dtype=torch.int64).view(1, 1, 1, -1)
+    start, end = resolve_local_window_bounds(
+        position, 
+        context_size=context_size, 
+        window_size=window_size,
+        param_tensor=param_tensor
+    )
+    # The mask should be true for indices in [start, end)
+    # AND indices <= position (causal)
+    in_window = (indices >= start) & (indices < end)
     causal = indices <= position
-    return (in_window & causal).view(1, 1, 1, -1)
+    return in_window & causal
 
 
 def _maybe_dequantize_tensor(value: Any) -> Tensor:
@@ -175,11 +188,13 @@ def exact_attention_context(
             context_size=context_size,
             window_size=spec.local_window_size,
             device=q.device,
+            param_tensor=param_tensor,
         )
         window_start, window_end = resolve_local_window_bounds(
             position,
             context_size=context_size,
             window_size=spec.local_window_size,
+            param_tensor=param_tensor,
         )
     else:
         local_mask = torch.ones((1, 1, 1, context_size), dtype=torch.bool, device=q.device)
