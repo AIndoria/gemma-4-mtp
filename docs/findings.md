@@ -34,8 +34,23 @@ module or a broken output head.
 
 ## Latest Milestone
 
-The most recent checkpoint recovered the last block's partial RoPE and verified
-that the remaining mismatch is not in the final logits head.
+The newest checkpoint recovered another important runtime contract: several
+internal linears are not just "float matmuls with quantized weights," they also
+need their outputs snapped back onto the TFLite int8 grid.
+
+The useful subset was:
+
+- all `q_proj` linears
+- all MLP linears (`gate_proj`, `up_proj`, `down_proj`)
+- `post_project`
+
+One especially helpful negative result also came out of this pass:
+
+- `pre_project` is quantized in the graph, but naively forcing it onto the same
+  output grid made parity worse, so it is intentionally left float for now
+
+This output-quantization pass materially improved end-to-end parity without
+hurting the already-strong teacher-forced block checks.
 
 ### Teacher-forced parity at position 700
 
@@ -57,20 +72,21 @@ substantially correct.
 Using `scripts/compare_tflite_runtime.py` on current code:
 
 - position `50`
-  - logits cosine: `0.9281`
-  - projected activations cosine: `0.9453`
+  - logits cosine: `0.9557`
+  - projected activations cosine: `0.9741`
   - top-1 match: `True`
 - position `700`
-  - logits cosine: `0.8631`
-  - projected activations cosine: `0.9164`
+  - logits cosine: `0.9547`
+  - projected activations cosine: `0.9785`
   - top-1 match: `False`
 - position `1000`
-  - logits cosine: `0.8490`
-  - projected activations cosine: `0.7074`
+  - logits cosine: `0.9471`
+  - projected activations cosine: `0.9633`
   - top-1 match: `False`
 
-So the model is clearly much closer than before, but still not export-ready as a
-"fully verified" drop-in replacement.
+This is the first checkpoint where parity is consistently strong across shallow,
+middle, and deeper decode positions. It is still not fully verified, but it is
+much closer to exportable than the previous checkpoint.
 
 ### Final heads are not the main problem
 
@@ -90,11 +106,12 @@ early and compounds across blocks on self-generated inputs.
 
 Current likely candidates:
 
-1. exact block-0/local-attention runtime behavior under the heavier synthetic
-   parity inputs
-2. missing quantize/dequant steps around early linears such as `pre_project`
-3. any other small runtime quantization contracts that do not show up when
-   blocks are teacher-forced but do accumulate during full autoregressive flow
+1. exact block-0/local-attention/runtime behavior in the remaining top-1
+   mismatch cases
+2. more precise handling of early-linears such as `pre_project`, whose graph
+   quantization is real but whose naive emulation currently hurts parity
+3. any additional small runtime quantization contracts that only show up in
+   self-fed inference and not under teacher forcing
 
 ## Implementation Status
 
@@ -103,6 +120,7 @@ Current likely candidates:
 - the PyTorch scaffold includes:
   - grouped-query attention over external KV caches
   - quantized `o_proj` runtime emulation
+  - output-quantized `q_proj`, MLP, and `post_project` runtime emulation
   - recovered layer-3 partial rotary behavior
 - the repo also now includes `scripts/compare_teacher_forced_blocks.py` for
   localizing parity by block using preserved TFLite intermediates

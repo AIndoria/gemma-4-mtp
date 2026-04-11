@@ -24,13 +24,39 @@ class DrafterOutput:
     all_hidden_states: list[Tensor] | None = None
 
 
+class OutputQuantLinear(nn.Linear):
+    def __init__(self, in_features: int, out_features: int, *, bias: bool = False) -> None:
+        super().__init__(in_features, out_features, bias=bias)
+        self.register_buffer("output_scale", None, persistent=False)
+        self.register_buffer("output_zero_point", None, persistent=False)
+
+    def set_output_quantization(
+        self,
+        *,
+        output_scale: Tensor,
+        output_zero_point: Tensor,
+    ) -> None:
+        self.output_scale = output_scale
+        self.output_zero_point = output_zero_point
+
+    def forward(self, input: Tensor) -> Tensor:
+        output = super().forward(input)
+        if self.output_scale is None or self.output_zero_point is None:
+            return output
+
+        scale = self.output_scale.to(device=output.device, dtype=torch.float32)
+        zero = self.output_zero_point.to(device=output.device, dtype=torch.float32)
+        q = torch.round(output.to(torch.float32) / scale + zero).clamp(-128, 127)
+        return (q - zero) * scale
+
+
 class ExternalAttentionAdapter(nn.Module):
     def __init__(self, spec: AttentionSpec, model_dim: int) -> None:
         super().__init__()
         self.spec = spec
         self.q_out_dim = spec.query_heads * spec.query_head_dim
         self.query_norm = RMSNorm(spec.query_head_dim)
-        self.q_proj = nn.Linear(model_dim, self.q_out_dim, bias=False)
+        self.q_proj = OutputQuantLinear(model_dim, self.q_out_dim, bias=False)
         self.o_proj = nn.Linear(self.q_out_dim, model_dim, bias=False)
         self.register_buffer("o_proj_input_scale", None, persistent=False)
         self.register_buffer("o_proj_input_zero_point", None, persistent=False)
@@ -184,9 +210,9 @@ class RMSNorm(nn.Module):
 class GatedMLP(nn.Module):
     def __init__(self, model_dim: int, hidden_dim: int) -> None:
         super().__init__()
-        self.gate_proj = nn.Linear(model_dim, hidden_dim, bias=False)
-        self.up_proj = nn.Linear(model_dim, hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, model_dim, bias=False)
+        self.gate_proj = OutputQuantLinear(model_dim, hidden_dim, bias=False)
+        self.up_proj = OutputQuantLinear(model_dim, hidden_dim, bias=False)
+        self.down_proj = OutputQuantLinear(hidden_dim, model_dim, bias=False)
 
     def forward(self, hidden_states: Tensor) -> Tensor:
         gated = F.gelu(self.gate_proj(hidden_states), approximate="tanh")
@@ -233,7 +259,7 @@ class GemmaMtpDrafter(nn.Module):
     def __init__(self, config: MtpDrafterConfig) -> None:
         super().__init__()
         self.config = config
-        self.pre_project = nn.Linear(
+        self.pre_project = OutputQuantLinear(
             config.input_activation_dim, config.model_dim, bias=False
         )
         self.blocks = nn.ModuleList(
@@ -241,8 +267,8 @@ class GemmaMtpDrafter(nn.Module):
             for spec in config.attention_specs
         )
         self.final_norm = RMSNorm(config.model_dim)
-        self.logits_head = nn.Linear(config.model_dim, config.vocab_size, bias=False)
-        self.post_project = nn.Linear(
+        self.logits_head = OutputQuantLinear(config.model_dim, config.vocab_size, bias=False)
+        self.post_project = OutputQuantLinear(
             config.model_dim, config.projected_activation_dim, bias=False
         )
 
