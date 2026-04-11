@@ -76,5 +76,5 @@ The detailed running log and current caveats live in `docs/findings.md`.
 
 - Original repository code and documentation are licensed under
   `AGPL-3.0-only`. See `LICENSE`.
-- Gemma-derived artifacts and upstream materials are not relicensed by this
-  repo. See `NOTICE`.
+- Gemma 4-derived artifacts and upstream materials are not relicensed by this
+  repo; keep their upstream Apache 2.0 notices intact. See `NOTICE`.

@@ -7,11 +7,13 @@ Licensing intent for this repository:
   are licensed under the GNU Affero General Public License v3.0 only. See
   `LICENSE`.
 - Third-party artifacts, model files, extracted graph exports, and any
-  Gemma-derived materials remain subject to their upstream licenses and terms.
-  This repository does not relicense those materials.
+  Gemma 4-derived materials remain subject to their upstream licenses and
+  notices. This repository does not relicense those materials.
 
 Practical rule:
 
 - Treat the reconstruction code as `AGPL-3.0-only`.
-- Treat Gemma-derived artifacts as remaining under the upstream Gemma terms and
-  notices that apply to them.
+- Treat Gemma 4-derived artifacts as remaining under the upstream Apache 2.0
+  license and preserve the notices that apply to them.
+- If you distribute Gemma-derived materials from this repository, keep any
+  required upstream notice text with those materials.
